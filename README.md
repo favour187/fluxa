@@ -8,9 +8,14 @@ with a single-use code (or QR link), compare a 6-digit key-verification code, an
 then stream files to each other over an encrypted WebRTC DataChannel with
 per-file SHA-256 verification and honest, acknowledgement-driven progress.
 
+The same transfer engine ships in three shapes from one codebase: the **browser
+client**, an **Electron desktop application** for Windows/macOS/Linux, and an
+**Android application** (Capacitor). Releases are built and tested by CircleCI.
+
 This repository is a **real implementation with a verified end-to-end transfer
 path** — not a mock. It is also deliberately honest about what is *not* built yet;
-see [Capability matrix](#capability-matrix).
+see [Capability matrix](#capability-matrix) and
+[Platform status](#platform-status).
 
 ![Fluxa — a completed transfer, with the receiving device showing a verified connection and SHA-256-checked file](docs/screenshots/received.png)
 
@@ -46,6 +51,7 @@ same profile are the *same* device and cannot pair with themselves).
 npm run check        # TypeScript, strict, no emit
 npm test             # build + 60 unit/integration tests (node:test)
 npm run test:e2e     # 12 Playwright tests, two independent browser contexts
+npm run test:desktop # 4 Electron tests under Xvfb (bridge, mDNS, 1 MB transfer)
 npm audit --omit=dev # production dependency audit
 ```
 
@@ -63,7 +69,9 @@ Legend: ✅ implemented and verified · ⚠️ implemented with documented limit
 | Capability | Status | Notes |
 |---|---|---|
 | Browser client (Chromium/Firefox/Safari engines) | ✅ | Single-page app, no framework; built with TypeScript + esbuild |
-| Native Windows / macOS / Linux / Android / iOS apps | 🚧 | Not built. The protocol and transfer engine are platform-neutral TypeScript; see [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#native-clients) |
+| Desktop app (Windows / macOS / Linux) | ✅ | Electron shell (`desktop/`) hosting the same client; AppImage, deb, NSIS installer and portable exe are built from it. Packaged binary verified: correct app name/version, `app.isPackaged`, working desktop bridge and a real 1 MB transfer in the packaged runtime |
+| Android app | ⚠️ | Capacitor WebView build; signed release APK + AAB are produced and their contents/signature verified. **Not yet exercised on physical hardware** |
+| iOS app | ❌ | Requires a macOS runner plus an Apple Developer account and provisioning profiles. Nothing is claimed here |
 | Single / multiple file transfer | ✅ | Verified with 0 B, 41 B, 512 KB, 8 MB, 32 MB and mixed batches |
 | Folder transfer (structure preserved) | ⚠️ | Directory picker uploads nested paths; the manifest and OPFS layout keep the structure, but "Save" downloads files individually (browser restriction) |
 | Chunked transfer, bounded memory | ✅ | 64 KiB chunks + ack window; measured **3.3 MB** JS-heap growth for a 32 MB transfer |
@@ -75,18 +83,87 @@ Legend: ✅ implemented and verified · ⚠️ implemented with documented limit
 | Pairing by short-lived code / QR link | ✅ | 2-minute TTL, single use, per-device rate limits |
 | 6-digit key verification (SAS) | ✅ | Derived from both identity keys + ephemeral ECDH + DTLS fingerprints |
 | Rename / revoke / disconnect devices | ✅ | Trust is revoked locally; changing a trusted key is refused |
-| Local-network discovery (mDNS/broadcast) | ❌ | Not implemented — pairing is code/QR only, as documented in the brief |
+| Local-network discovery (mDNS/broadcast) | ⚠️ | The **desktop app** advertises and browses `_fluxa._tcp` over mDNS (verified by a test that asserts real discovery). Browsers cannot open raw mDNS sockets, so the browser build discovers nothing and relies on the signalling server |
 | Direct P2P across networks (STUN) | ⚠️ | Works when ICE host/srflx candidates succeed; needs `FLUXA_ICE_SERVERS` configured |
 | Relay fallback (TURN) | ⚠️ | Supported by configuration; **no relay service is bundled or operated** |
 | Honest direct-vs-relay indicator | ✅ | Reported from ICE stats (`host`/`srflx` = direct, else relayed) |
 | Clipboard / links / browser handoff | 🚧 | Not implemented. No clipboard monitoring exists in this build |
-| App packages (APK, MSI, DMG, DEB) | ⚠️ | Transferred as ordinary files only; Fluxa never installs or migrates an app |
+| Transferring package files (APK, MSI, DMG, DEB) | ⚠️ | Transferred as ordinary files only; Fluxa never installs or migrates an app |
 | Screen sharing / task continuity | 🚧 | Interfaces are described in [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md#future-continuity); none is implemented |
 
 Anything marked 🚧 or ❌ is *not* present in the UI — Fluxa does not pretend to have
 features it lacks.
 
 ---
+
+## Platform status
+
+| Platform | Distribution | Built here | Signed | Verified how |
+| --- | --- | --- | --- | --- |
+| Web (any modern browser) | served from `dist/` + `public/` | ✅ `Fluxa-0.2.0-web.zip` | n/a | 12 Playwright tests, two real browser contexts |
+| Linux x86-64 | AppImage, `.deb` | ✅ | ❌ no GPG/repo signing | packaged binary launched under Xvfb: name, version, `isPackaged`, bridge, 1 MB transfer |
+| Windows x86-64 | NSIS installer, portable `.exe` | ✅ | ❌ no Authenticode certificate | icon resources and `0.2.0` version resource present in `Fluxa.exe`; installer produced by electron-builder |
+| macOS (x64 → also arm64 via CI) | `.dmg`, `.zip` | ⚠️ zip built on Linux | ❌ not signed/notarised | `Info.plist` identifiers/version verified; the dmg is produced only on macOS (see [docs/RELEASE.md](docs/RELEASE.md)) |
+| Android (API 24+, target 34) | signed `.apk`, `.aab` | ✅ | ✅ local release key | `apksigner verify` v1+v2, `aapt2 dump badging` (`com.fluxa.transfer`, versionCode 200, versionName 0.2.0, label `Fluxa`, adaptive icon) |
+| iOS | — | ❌ | — | needs macOS + Apple Developer account |
+
+**A compiler emitting a file is not proof.** The checks above were run against
+the produced files; the exact commands are in
+[docs/RELEASE.md](docs/RELEASE.md) and [docs/TEST-REPORT.md](docs/TEST-REPORT.md).
+
+### Desktop application
+
+```bash
+npm run desktop        # run the Electron app against the local build
+npm run desktop:pack   # unpacked app in release/
+```
+
+The desktop build adds what a browser cannot do: mDNS discovery on the LAN, a
+native save dialog for received files, a per-user data directory for identity and
+received files, and a persistent signalling-server setting (Settings → *Signalling
+server*). It is **not** a renamed web page: the renderer is served from
+`app.asar` through a privileged protocol handler with a strict CSP, file writes go
+through a context-isolated preload bridge (`window.fluxaDesktop`), and remote
+content cannot load.
+
+### Android application
+
+```bash
+node scripts/sync-android.mjs                 # build web assets → cap sync → version + icons
+cd android && ./gradlew assembleRelease bundleRelease
+```
+
+Outputs: `android/app/build/outputs/apk/release/Fluxa-0.2.0-release.apk` and
+`android/app/build/outputs/bundle/release/Fluxa-0.2.0-release.aab`.
+
+Sideloading needs "install unknown apps" enabled for the file manager; the AAB
+is for Play Console upload or `bundletool`. Signing material is generated locally
+and **is not registered with Google Play** — see
+[docs/RELEASE.md](docs/RELEASE.md#android).
+
+## Packaging and artifacts
+
+```bash
+npm run dist:linux   # release/Fluxa-<version>-linux-x86_64.AppImage + .deb
+npm run dist:win     # release/Fluxa-<version>-x64-setup.exe + -portable.exe
+npm run dist:mac     # macOS only: release/Fluxa-<version>-mac-*.dmg/.zip
+npm run version:sync # package.json → android/version.properties + strings.xml
+node scripts/build-manifest.mjs --out artifacts/manifest   # hashes + signing state
+```
+
+Artifacts are never committed; CI uploads them to the CircleCI job and, on a
+version tag, to a **draft** GitHub release. Every build writes
+`build-manifest.json` (version, commit, per-file SHA-256, signing state) next to
+the files.
+
+## Continuous integration
+
+CircleCI runs `.circleci/config.yml`: `validate` (type-check, 60 unit tests,
+production build), `security` (production audit + secret scan), `e2e-browser`,
+`e2e-desktop`, and platform builds for web, Linux, Windows, Android and macOS.
+Tags `v*` add a manual approval before a draft GitHub release. Setup, required
+environment variables and the exact commands are in
+[docs/CI-CD.md](docs/CI-CD.md).
 
 ## How a transfer actually works
 
@@ -116,9 +193,14 @@ DTLS packets without being able to read them. See
 src/shared/      protocol framing, crypto helpers, filename safety, validation
 src/server/      HTTP static host + WebSocket signalling, pairing store, rate limits
 src/client/      identity, signalling client, WebRTC peer session, transfer engine, UI
-test/unit/       Node tests: protocol, crypto, pairing, signalling (real sockets), transfer engine
+desktop/         Electron main process + context-isolated preload bridge (mDNS, fs, save dialog)
+android/         Capacitor Android project (generated, tuned: signing, manifest, icons, splash)
+scripts/         build, icon/splash generation, version sync, Android sync, build manifest
 e2e/             Playwright: two real browsers, real WebRTC, real files
-docs/            architecture, security, networking, test report, platform notes
+e2e-desktop/     Playwright + Electron: packaged runtime behaviour
+test/unit/       Node tests: protocol, crypto, pairing, signalling (real sockets), transfer engine
+.circleci/       CircleCI pipeline (validate, security, E2E, per-platform builds, tag release)
+docs/            architecture, security, networking, CI/CD, release, test report, platform notes
 ```
 
 ## Security in one paragraph
@@ -136,9 +218,12 @@ the things this design does **not** protect against.
 
 ## Requirements
 
-* Node.js ≥ 20 (server and tests)
+* Node.js ≥ 20 (server, tests, builds) and npm
 * A modern browser with WebRTC DataChannels and IndexedDB
 * Linux/macOS/Windows for the server; it is a single process with no database
+* Packaging: electron-builder (downloads its own tooling); Android needs JDK 17+
+  and the Android SDK (build-tools 35, platform 34)
+* Optional for Windows packages on a Linux host: `wine` + `wine32`
 
 ## License
 

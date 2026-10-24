@@ -33,10 +33,28 @@ means per platform, and what a native client would and would not be allowed to d
 | Session/cookie transfer | Never implemented. Authentication cookies, passwords and tokens are out of scope |
 | Permanent background transfers | Browsers expire background tabs; a resumed-on-reconnect design is required (see ARCHITECTURE.md) |
 
-## What a native client would add
+## What the desktop shell already provides
+
+Fluxa ships an Electron shell (`desktop/`) that hosts the exact same client inside
+`app.asar`, served through a privileged protocol handler with a strict CSP. It
+adds, today and verified by tests:
+
+* **mDNS discovery** of `_fluxa._tcp` peers on the local network (browsers cannot
+  open raw mDNS sockets). The desktop test asserts a real advertisement is
+  discovered — discovery is a shortcut to pairing, never trust.
+* **Native save dialog** for received files, and a per-user data directory that
+  survives restarts.
+* **Persistent signalling-server setting**, so a self-hosted server does not have
+  to be re-entered per session.
+
+What the shell still does **not** do: background transfers after the window
+closes, tray/menu-bar presence, OS share targets, platform keystores for the
+identity key (it is still IndexedDB inside the app's origin), or folder sinks.
+
+## What a deeper native client would add
 
 The protocol, transfer engine and validation code are transport- and platform-
-neutral. A native shell would add:
+neutral. A fully native client would add:
 
 * LAN discovery (mDNS on macOS/Linux, DNS-SD/`NsdManager` on Android, `NWBrowser` on
   iOS) with the same pairing/verification flow on top — discovery is never trust.
@@ -53,7 +71,14 @@ neutral. A native shell would add:
 
 * **Verified:** headless Chromium (Linux container) via Playwright — 12 end-to-end
   tests, two independent browser contexts, real WebRTC and real files.
-* **Not verified in this environment:** Safari, Firefox, Android, iOS, Windows,
-  macOS. The code paths are standards-based and the UI is responsive, but nobody
-  should read this repository as "tested on every platform" until those runs exist.
-  A reproducibility script is in TEST-REPORT.md.
+* **Verified:** the packaged Linux desktop app (`release/linux-unpacked/fluxa`) under
+  Xvfb — app name/version/`isPackaged`, preload bridge, mDNS discovery, 1 MB
+  transfer with matching SHA-256, identity persistence.
+* **Built and inspected, not run on real hardware:** Android release APK/AAB
+  (signature, badging, assets, icons, splash), Windows NSIS/portable exe (version
+  resource, icons), macOS `.app`/`.zip` (`Info.plist`).
+* **Not verified anywhere yet:** Safari, Firefox, iOS, and any physical phone or
+  Windows/macOS machine. The code paths are standards-based and the UI is
+  responsive, but nobody should read this repository as "tested on every
+  platform" until those runs exist. A reproducibility script is in
+  TEST-REPORT.md.

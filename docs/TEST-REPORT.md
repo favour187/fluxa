@@ -239,3 +239,51 @@ Notes for reproducing:
 * Resumability, clipboard/link sharing, browser handoff, screen sharing, native
   apps, and app-package installation — none of these is implemented, so none is
   claimed.
+
+## 10. Packaging verification (v0.2.0)
+
+Everything below was executed in this workspace; each check inspects the produced
+file, not just the exit status of a compiler.
+
+### Desktop (Linux) — packaged binary, not the dev server
+
+```bash
+xvfb-run -a node -e "…electron.launch({executablePath:'release/linux-unpacked/fluxa'})…"
+# app.getName() = Fluxa, getVersion() = 0.2.0, isPackaged = true
+# appPath = …/resources/app.asar, desktop bridge = 9 methods, device id = 43 chars
+# signal online: ws://127.0.0.1:<port>/ws
+```
+
+`npm run test:desktop` (4 tests, Xvfb) additionally proves: two desktop
+instances pair through one instance's embedded server, a real 1 MB file
+transfers with matching SHA-256, **the bytes are written to disk through the
+native save dialog** (the OS chooser is stubbed, the IPC write is real and the
+file is re-hashed from the filesystem), mDNS advertises and discovers a nearby
+instance, and identity/files survive a restart of the same profile.
+
+### Android
+
+```bash
+apksigner verify --verbose android/app/build/outputs/apk/release/Fluxa-0.2.0-release.apk
+# Verifies using v1 + v2, 1 signer, CN=Fluxa … (local release key)
+aapt2 dump badging …apk
+# package com.fluxa.transfer, versionCode 200, versionName 0.2.0, label Fluxa
+unzip -l …apk | grep -c '\.map$'    # 0 — no source maps shipped
+aapt2 dump resources …apk | grep drawable/splash   # brand splash in every density
+```
+
+### Windows / macOS
+
+* `Fluxa.exe` contains the `0.2.0` version resource and the icon group
+  (`wrestool -l`: 5 icon entries).
+* `Fluxa.app/Contents/Info.plist`: `CFBundleIdentifier=com.fluxa.transfer`,
+  `CFBundleShortVersionString=0.2.0`, `CFBundleName=Fluxa`,
+  `LSMinimumSystemVersion=11.0`.
+* Both are **unsigned** (no Authenticode / Developer ID certificate exists here);
+  the build manifest records that per file.
+
+### Not verified
+
+* No physical Android device, no Windows machine and no macOS machine ran these
+  packages. The artifacts were built and inspected, not installed on hardware.
+* macOS `.dmg` was not produced (requires macOS); only the `.zip` was.
