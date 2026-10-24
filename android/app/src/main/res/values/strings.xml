@@ -1,0 +1,7 @@
+<?xml version='1.0' encoding='utf-8'?>
+<resources>
+    <string name="app_name">Fluxa</string>
+    <string name="title_activity_main">Fluxa</string>
+    <string name="package_name">com.fluxa.transfer</string>
+    <string name="custom_url_scheme">com.fluxa.transfer</string>
+</resources>

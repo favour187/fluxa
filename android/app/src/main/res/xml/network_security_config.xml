@@ -1,0 +1,17 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+  Fluxa's signalling channel carries only SDP/ICE and pairing metadata — file
+  bytes always travel over DTLS between the two devices, never through a server.
+
+  A deployed Fluxa server should be served over TLS and used with wss://. A Fluxa
+  desktop app acting as the pairing server on a home LAN only offers plain ws://
+  on a private address, so cleartext is permitted for that case. Remote endpoints
+  are expected to be wss:// and the app never sends file data over this channel.
+-->
+<network-security-config>
+    <base-config cleartextTrafficPermitted="true">
+        <trust-anchors>
+            <certificates src="system" />
+        </trust-anchors>
+    </base-config>
+</network-security-config>
