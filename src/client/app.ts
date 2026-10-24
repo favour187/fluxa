@@ -23,6 +23,7 @@ import type { SendTask } from './transfer/sender.js';
 import type { ReceivedFile } from './transfer/sink.js';
 import { clearReceivedFiles } from './transfer/sink.js';
 import { formatBytes } from '../shared/protocol.js';
+import { desktopBridge, hasFilePicker, type DesktopBridge, type DesktopInfo, type NearbyPeer } from './desktop.js';
 
 export interface SessionView {
   deviceId: string;
@@ -77,6 +78,9 @@ export interface AppSnapshot {
   verification: SessionView | null;
   toasts: Toast[];
   iceConfigured: boolean;
+  desktop: DesktopInfo | null;
+  nearby: NearbyPeer[];
+  signalUrl: string | null;
 }
 
 interface SessionEntry {
@@ -88,6 +92,39 @@ interface SessionEntry {
 }
 
 type Listener = (snapshot: AppSnapshot) => void;
+
+const SIGNAL_URL_KEY = 'fluxa:signal-url';
+
+/** Accept "host:port", "http://host:port", "ws://host/ws" and normalise to a ws URL. */
+export function normaliseSignalUrl(input: string): string | null {
+  const raw = input.trim();
+  if (!raw) return null;
+  const withScheme = /^[a-z]+:\/\//i.test(raw) ? raw : `http://${raw}`;
+  let parsed: URL;
+  try {
+    parsed = new URL(withScheme);
+  } catch {
+    return null;
+  }
+  if (!['http:', 'https:', 'ws:', 'wss:'].includes(parsed.protocol)) return null;
+  if (!parsed.hostname) return null;
+  const secure = parsed.protocol === 'https:' || parsed.protocol === 'wss:';
+  return `${secure ? 'wss' : 'ws'}://${parsed.host}${parsed.pathname === '/' || !parsed.pathname ? '/ws' : parsed.pathname}`;
+}
+
+function defaultSignalUrl(): string {
+  const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+  return `${proto}//${location.host}/ws`;
+}
+
+function readSavedSignalUrl(): string | null {
+  try {
+    const saved = localStorage.getItem(SIGNAL_URL_KEY);
+    return saved && normaliseSignalUrl(saved) ? normaliseSignalUrl(saved) : null;
+  } catch {
+    return null;
+  }
+}
 
 export class FluxaApp {
   identity: Identity | null = null;
@@ -106,14 +143,92 @@ export class FluxaApp {
   private pendingRender = false;
   private ready = false;
   private iceConfigured = false;
+  private desktop: DesktopBridge | null = desktopBridge();
+  private desktopInfo: DesktopInfo | null = null;
+  private nearby: NearbyPeer[] = [];
+  private nearbyInbound: NearbyPeer[] = [];
 
   async init(): Promise<void> {
     this.identity = await loadIdentity();
     this.trusted = await listTrusted();
-    this.signal = new SignalClient(this.identity);
+    // Signalling endpoint precedence:
+    //   1. a URL the user saved (desktop/mobile instances with no server of their own)
+    //   2. the desktop shell's embedded server or an explicit --fluxa-signal-url
+    //   3. same-origin (the browser build served by `npm start`)
+    const saved = readSavedSignalUrl();
+    const external = this.desktop ? (await this.desktop.info().catch(() => null))?.signalUrl : null;
+    this.signal = new SignalClient(this.identity, saved ?? external ?? undefined);
     this.signal.on((event) => void this.onSignalEvent(event));
     this.signal.connect();
+    await this.initDesktop();
     this.ready = true;
+    this.emit();
+  }
+
+  private async initDesktop(): Promise<void> {
+    const bridge = this.desktop;
+    if (!bridge || !this.identity) return;
+    try {
+      this.desktopInfo = await bridge.info();
+      await bridge.setIdentity({
+        deviceId: this.identity.deviceId,
+        name: this.identity.name,
+        platform: this.identity.platform,
+      });
+      bridge.onNearby((peers) => {
+        this.nearby = peers;
+        this.emit();
+      });
+    } catch (err) {
+      this.toast('error', `Desktop integration unavailable: ${(err as Error).message}`);
+    }
+  }
+
+  /** Persist and apply a signalling endpoint (e.g. this PC's address for a phone). */
+  setSignalUrl(input: string): boolean {
+    const url = normaliseSignalUrl(input);
+    if (!url) {
+      this.toast('error', 'Enter a server address like 192.168.1.20:8787');
+      return false;
+    }
+    try {
+      localStorage.setItem(SIGNAL_URL_KEY, url);
+    } catch {
+      /* storage unavailable: the setting applies for this session only */
+    }
+    this.signal?.setUrl(url);
+    this.toast('info', `Signalling server set to ${url.replace(/^wss?:\/\//, '').replace(/\/ws$/, '')}`);
+    this.emit();
+    return true;
+  }
+
+  resetSignalUrl(): void {
+    try {
+      localStorage.removeItem(SIGNAL_URL_KEY);
+    } catch {
+      /* ignore */
+    }
+    const fallback = this.desktopInfo?.localUrl
+      ? `${this.desktopInfo.localUrl.replace(/^http/, 'ws')}/ws`
+      : undefined;
+    this.signal?.setUrl(fallback ?? defaultSignalUrl());
+    this.emit();
+  }
+
+  /** Point signalling at a nearby device's embedded server. */
+  useNearbyServer(peer: NearbyPeer): void {
+    if (!this.signal) return;
+    this.signal.setUrl(peer.url);
+    this.toast('info', `Using ${peer.name} as the pairing server`);
+    this.emit();
+  }
+
+  /** Switch back to this device's own embedded server. */
+  useLocalServer(): void {
+    if (!this.signal || !this.desktopInfo) return;
+    const url = this.desktopInfo.localUrl.replace(/^http/, 'ws');
+    this.signal.setUrl(`${url}/ws`);
+    this.toast('info', 'Using this device as the pairing server');
     this.emit();
   }
 
@@ -163,6 +278,9 @@ export class FluxaApp {
       verification: sessions.find((s) => s.state === 'awaiting-verification') ?? null,
       toasts: [...this.toasts],
       iceConfigured: this.iceConfigured,
+      desktop: this.desktopInfo,
+      nearby: this.nearby,
+      signalUrl: this.signal?.currentUrl ?? null,
     };
   }
 
@@ -328,6 +446,10 @@ export class FluxaApp {
       onUpdate: (task) => this.onTransferUpdate(task),
       onIncoming: (task) => {
         this.incoming = { task };
+        void this.desktop?.notify(
+          `Incoming from ${task.peerName}`,
+          `${task.files.length} file${task.files.length === 1 ? '' : 's'} · ${formatBytes(task.totalBytes)}`,
+        );
         this.emit();
       },
       onFinished: (task, files) => this.onTransferFinished(task, files),
@@ -422,6 +544,7 @@ export class FluxaApp {
     if (task.state === 'complete') {
       const direction = task.role === 'send' ? 'Sent' : 'Received';
       this.toast('success', `${direction} ${task.files.length} file${task.files.length === 1 ? '' : 's'} (${formatBytes(task.totalBytes)})`);
+      void this.desktop?.notify(`${direction} ${task.files.length} file${task.files.length === 1 ? '' : 's'}`, `${formatBytes(task.totalBytes)} · verified`);
     } else if (task.state === 'failed') {
       this.toast('error', task.error ?? 'Transfer failed');
     }
@@ -541,6 +664,11 @@ export class FluxaApp {
     await setDeviceName(clean);
     this.identity = { ...this.identity, name: clean };
     this.signal?.updateProfile(clean);
+    void this.desktop?.setIdentity({
+      deviceId: this.identity.deviceId,
+      name: this.identity.name,
+      platform: this.identity.platform,
+    });
     this.emit();
   }
 
@@ -550,14 +678,60 @@ export class FluxaApp {
     for (const file of files) {
       const blob = file.blob;
       if (!blob) continue;
-      const url = URL.createObjectURL(blob);
-      const anchor = document.createElement('a');
-      anchor.href = url;
-      anchor.download = file.descriptor.name;
-      anchor.rel = 'noopener';
-      anchor.click();
-      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+      const saved = await this.saveBlob(file.descriptor.name, blob);
+      if (saved === 'picker') this.toast('success', `Saved ${file.descriptor.name}`);
     }
+  }
+
+  /**
+   * Prefer the File System Access API (real destination, streamed to disk, no
+   * second copy in memory). Fall back to a normal download where it is not
+   * available, which is still a genuine save — just to the browser's folder.
+   */
+  private async saveBlob(name: string, blob: Blob): Promise<'picker' | 'download' | 'desktop' | 'cancelled'> {
+    // Desktop app: the user picks a real destination in a native dialog and the
+    // main process writes the bytes (no browser download directory involved).
+    const bridge = desktopBridge();
+    if (bridge) {
+      const choice = await bridge.saveDialog(name);
+      if (choice.canceled || !choice.filePath) return 'cancelled';
+      const bytes = new Uint8Array(await blob.arrayBuffer());
+      const written = await bridge.saveFile(choice.filePath, bytes);
+      if (written.ok) {
+        this.toast('success', `Saved ${name} to ${choice.filePath}`);
+        return 'desktop';
+      }
+      this.toast('error', `Could not save ${name}: ${written.error ?? 'unknown error'}`);
+      return 'cancelled';
+    }
+    if (hasFilePicker()) {
+      try {
+        const picker = window as unknown as {
+          showSaveFilePicker: (o: unknown) => Promise<{
+            createWritable: () => Promise<{ write: (d: Blob) => Promise<void>; close: () => Promise<void> }>;
+          }>;
+        };
+        const handle = await picker.showSaveFilePicker({
+          suggestedName: name,
+          types: [{ description: 'File', accept: { [blob.type || 'application/octet-stream']: [`.${name.split('.').pop() ?? 'bin'}`] } }],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(blob);
+        await writable.close();
+        return 'picker';
+      } catch (err) {
+        if ((err as Error).name === 'AbortError') return 'cancelled';
+        // Any other failure falls through to a download rather than losing the file.
+      }
+    }
+    const url = URL.createObjectURL(blob);
+    const anchor = document.createElement('a');
+    anchor.href = url;
+    anchor.download = name;
+    anchor.rel = 'noopener';
+    anchor.click();
+    setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    return 'download';
   }
 
   receivedFiles(transferId: string): ReceivedFile[] {

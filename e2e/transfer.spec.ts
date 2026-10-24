@@ -142,8 +142,13 @@ test('declining a transfer leaves the sender informed and nothing completed', as
 });
 
 test('cancelling mid-transfer stops both sides and produces no file', async () => {
-  const big = randomFile('big-cancel.bin', 24 * 1024 * 1024);
-  await a.page.getByTestId('file-input').setInputFiles([big]);
+  // Written to disk rather than held in a Buffer: a 24 MB buffer pushed through
+  // CDP is what makes the renderer die in small CI containers, and a real file
+  // is closer to what a user drops on the window anyway.
+  const dir = await mkdtemp(join(tmpdir(), 'fluxa-cancel-'));
+  const bigPath = join(dir, 'big-cancel.bin');
+  await writeFile(bigPath, randomBytes(24 * 1024 * 1024));
+  await a.page.getByTestId('file-input').setInputFiles([bigPath]);
   await b.page.getByTestId('accept-transfer').click();
   await waitForState(a.page, 'transferring');
 
@@ -155,6 +160,8 @@ test('cancelling mid-transfer stops both sides and produces no file', async () =
   const received = await receivedFiles(b.page);
   expect(received).toHaveLength(0);
   await expect(b.page.getByTestId('save-received')).toHaveCount(0);
+
+  await rm(dir, { recursive: true, force: true });
 });
 
 test('a second send is queued instead of running in parallel', async () => {

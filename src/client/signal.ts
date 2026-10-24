@@ -67,6 +67,33 @@ export class SignalClient {
     this.url = url ?? `${proto}//${location.host}/ws`;
   }
 
+  get currentUrl(): string {
+    return this.url;
+  }
+
+  /**
+   * Point this client at a different signalling server (used for nearby devices
+   * discovered over mDNS). The page origin never changes, so device identity and
+   * the trust store survive the switch.
+   */
+  setUrl(url: string): void {
+    if (this.url === url) {
+      this.connect();
+      return;
+    }
+    this.url = url;
+    this.reconnectAttempts = 0;
+    if (this.socket) {
+      try {
+        this.socket.close();
+      } catch {
+        /* already closing */
+      }
+      this.socket = null;
+    }
+    this.connect();
+  }
+
   on(listener: Listener): () => void {
     this.listeners.add(listener);
     return () => this.listeners.delete(listener);

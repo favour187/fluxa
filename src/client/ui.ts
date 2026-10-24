@@ -182,6 +182,15 @@ export class FluxaUI {
         </button>
       </div>
       <ul class="device-list" id="device-list" data-testid="device-list"></ul>
+      <div class="nearby-section" id="nearby-section" hidden>
+        <div class="nearby-head">
+          <span class="eyebrow">Nearby on this network</span>
+          <button class="btn btn-ghost btn-xs" id="use-local-server" type="button" data-testid="use-local-server" hidden>Use my server</button>
+        </div>
+        <ul class="nearby-list" id="nearby-list" data-testid="nearby-list"></ul>
+        <p class="muted tiny" id="nearby-empty">Looking for other Fluxa apps on this network…</p>
+        <p class="nearby-address muted tiny">This device: <code id="local-address"></code></p>
+      </div>
       <div class="empty" id="device-empty">
         <div class="empty-orb" aria-hidden="true"></div>
         <p><strong>No paired devices yet</strong></p>
@@ -232,6 +241,7 @@ export class FluxaUI {
     this.snapshot = snapshot;
     this.renderStatus(snapshot);
     this.renderDevices(snapshot);
+    this.renderNearby(snapshot);
     this.renderStage(snapshot);
     this.renderTransfers(snapshot);
     this.syncPairingModal(snapshot);
@@ -366,6 +376,45 @@ export class FluxaUI {
 
     if (this.selectedDeviceId && !snapshot.devices.some((d) => d.deviceId === this.selectedDeviceId)) {
       this.selectedDeviceId = null;
+    }
+  }
+
+  private renderNearby(snapshot: AppSnapshot): void {
+    const section = this.q('#nearby-section');
+    if (!snapshot.desktop) {
+      section.hidden = true;
+      return;
+    }
+    section.hidden = false;
+
+    const address = this.q('#local-address');
+    address.textContent = snapshot.desktop.localUrl.replace(/^http:\/\//, '');
+
+    const list = this.q('#nearby-list');
+    const empty = this.q('#nearby-empty');
+    list.replaceChildren();
+    empty.hidden = snapshot.nearby.length > 0;
+
+    for (const peer of snapshot.nearby) {
+      const item = el('li', 'nearby-item');
+      item.dataset.testid = 'nearby-item';
+      const body = el('div', 'nearby-body');
+      body.append(el('strong', undefined, peer.name), el('span', 'muted tiny', `${peer.platform} · ${peer.host}:${peer.port}`));
+      const use = el('button', 'btn btn-ghost btn-xs', 'Connect');
+      use.type = 'button';
+      use.dataset.testid = 'use-nearby';
+      use.addEventListener('click', () => this.app.useNearbyServer(peer));
+      item.append(body, use);
+      list.append(item);
+    }
+
+    // Offer the way back when signalling has been pointed at another device.
+    const usingOwn = snapshot.signalUrl?.includes(snapshot.desktop.localUrl.replace(/^http:\/\//, '')) ?? false;
+    const back = this.q<HTMLButtonElement>('#use-local-server');
+    back.hidden = usingOwn || snapshot.nearby.length === 0;
+    if (!back.dataset.bound) {
+      back.dataset.bound = '1';
+      back.addEventListener('click', () => this.app.useLocalServer());
     }
   }
 
@@ -918,6 +967,16 @@ export class FluxaUI {
       <div class="kv"><span>Device ID</span><code data-testid="device-id">${esc(identity?.deviceId.slice(0, 22) ?? '')}…</code></div>
       <div class="kv column"><span>Identity fingerprint (SHA-256)</span><code class="fingerprint">${esc(identity?.fingerprint ?? '')}</code></div>
       <p class="muted tiny">Paired devices pin this key. If the key ever changes, the pairing is refused — clear site data only if you intentionally reinstall Fluxa.</p>
+      <form class="settings-form" id="signal-form">
+        <label for="signal-url">Signalling server</label>
+        <div class="inline">
+          <input id="signal-url" placeholder="192.168.1.20:8787" data-testid="signal-url-input" value="${esc(
+            (this.snapshot?.signalUrl ?? '').replace(/^wss?:\/\//, '').replace(/\/ws$/, ''),
+          )}"/>
+          <button class="btn btn-ghost" type="submit" data-testid="save-signal-url">Save</button>
+        </div>
+        <p class="muted tiny">The address of the Fluxa app (or server) that brokers pairing. Use this device's own address on desktop, or your computer's address from a phone.</p>
+      </form>
       <label class="switch-row">
         <input type="checkbox" id="reduce-motion" data-testid="reduce-motion" ${document.documentElement.dataset.reducedMotion === 'true' ? 'checked' : ''}/>
         <span>Reduce motion (disables ambient and progress animations)</span>
@@ -937,6 +996,13 @@ export class FluxaUI {
       void this.app.clearReceivedStorage();
       this.closeOverlay();
     });
+    const signalForm = modal.querySelector<HTMLFormElement>('#signal-form')!;
+    signalForm.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const input = modal.querySelector<HTMLInputElement>('#signal-url')!;
+      if (this.app.setSignalUrl(input.value)) this.closeOverlay();
+    });
+
     const reduceMotion = modal.querySelector<HTMLInputElement>('#reduce-motion')!;
     reduceMotion.addEventListener('change', () => {
       document.documentElement.dataset.reducedMotion = reduceMotion.checked ? 'true' : 'false';

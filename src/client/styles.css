@@ -579,6 +579,51 @@ code {
   border-color: rgba(90, 242, 198, 0.3);
 }
 
+.nearby-section {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 11px;
+  border-radius: var(--radius);
+  border: 1px dashed rgba(79, 209, 255, 0.28);
+  background: rgba(79, 209, 255, 0.05);
+}
+.nearby-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.nearby-list {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+}
+.nearby-item {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  padding: 7px 9px;
+  border-radius: 10px;
+  background: rgba(255, 255, 255, 0.04);
+}
+.nearby-body {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+}
+.nearby-body strong {
+  font-size: 12.5px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.nearby-address code {
+  font-size: 10.5px;
+  color: #9fd8ef;
+}
+
 .empty {
   flex: 1;
   display: flex;

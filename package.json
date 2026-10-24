@@ -1,9 +1,9 @@
 {
   "name": "fluxa",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Fluxa — move anything. anywhere. Cross-device transfer app (browser reference implementation).",
+  "description": "Fluxa — move anything, anywhere. Verified, device-to-device file transfer.",
   "engines": {
     "node": ">=20"
   },
@@ -15,17 +15,159 @@
     "test": "node scripts/build.mjs && node --test dist/test/unit/",
     "test:unit": "node scripts/build.mjs && node --test dist/test/unit/",
     "test:e2e": "node scripts/build.mjs && playwright test",
-    "verify": "npm run check && npm test"
+    "verify": "npm run check && npm test",
+    "build:web": "node scripts/build.mjs",
+    "icons": "node scripts/make-icons.mjs",
+    "desktop": "node scripts/build.mjs && electron .",
+    "desktop:pack": "node scripts/build.mjs && electron-builder --dir --config.asar=true",
+    "dist:linux": "node scripts/build.mjs && electron-builder --linux AppImage deb --publish never",
+    "dist:win": "node scripts/build.mjs && electron-builder --win nsis portable --publish never",
+    "dist:mac": "node scripts/build.mjs && electron-builder --mac dmg zip --publish never",
+    "test:desktop": "node scripts/build.mjs && playwright test -c e2e-desktop/playwright.desktop.config.ts",
+    "version:sync": "node scripts/sync-version.mjs"
   },
   "dependencies": {
+    "@capacitor/android": "^6.2.2",
+    "@capacitor/app": "^6.0.3",
+    "@capacitor/core": "^6.2.2",
+    "@capacitor/filesystem": "^6.0.4",
     "qrcode-generator": "^1.5.2",
     "ws": "^8.22.0"
   },
   "devDependencies": {
+    "@capacitor/cli": "^6.2.2",
     "@playwright/test": "^1.64.1",
     "@types/node": "^22.20.5",
     "@types/ws": "^8.18.2",
+    "bonjour-service": "^1.4.4",
+    "electron": "^33.4.11",
+    "electron-builder": "^25.1.8",
     "esbuild": "^0.28.2",
     "typescript": "^5.9.3"
+  },
+  "author": {
+    "name": "Fluxa",
+    "email": "fluxa@users.noreply.github.com",
+    "url": "https://github.com/favour187/fluxa"
+  },
+  "license": "MIT",
+  "homepage": "https://github.com/favour187/fluxa",
+  "main": "desktop/main.mjs",
+  "build": {
+    "appId": "com.fluxa.transfer",
+    "productName": "Fluxa",
+    "copyright": "Copyright © 2026 Fluxa contributors",
+    "directories": {
+      "output": "release",
+      "buildResources": "build"
+    },
+    "files": [
+      "dist/**/*",
+      "public/**/*",
+      "desktop/**/*",
+      "package.json",
+      "!**/*.map",
+      "!dist/test/**",
+      "!dist/src/**"
+    ],
+    "extraMetadata": {
+      "main": "desktop/main.mjs"
+    },
+    "asar": true,
+    "npmRebuild": false,
+    "electronDownload": {},
+    "linux": {
+      "target": [
+        {
+          "target": "AppImage",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "deb",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "category": "Utility;Network;FileTransfer",
+      "icon": "build/icons",
+      "maintainer": "Fluxa <fluxa@users.noreply.github.com>",
+      "synopsis": "Move anything. Anywhere.",
+      "description": "Fluxa transfers files between your devices over an encrypted peer-to-peer connection, with pairing codes, 6-digit key verification and SHA-256 integrity checks.",
+      "desktop": {
+        "entry": {
+          "Name": "Fluxa",
+          "Comment": "Move anything. Anywhere.",
+          "Categories": "Utility;Network;"
+        }
+      }
+    },
+    "win": {
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        },
+        {
+          "target": "portable",
+          "arch": [
+            "x64"
+          ]
+        }
+      ],
+      "icon": "build/icon.ico",
+      "artifactName": "${productName}-${version}-${arch}.${ext}"
+    },
+    "nsis": {
+      "oneClick": false,
+      "perMachine": false,
+      "allowToChangeInstallationDirectory": true,
+      "createDesktopShortcut": true,
+      "shortcutName": "Fluxa",
+      "artifactName": "${productName}-${version}-${arch}-setup.${ext}"
+    },
+    "mac": {
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "x64",
+            "arm64"
+          ]
+        }
+      ],
+      "category": "public.app-category.productivity",
+      "icon": "build/icon.png",
+      "hardenedRuntime": true,
+      "gatekeeperAssess": false,
+      "entitlements": "build/entitlements.mac.plist",
+      "entitlementsInherit": "build/entitlements.mac.plist"
+    },
+    "dmg": {
+      "title": "Fluxa ${version}"
+    },
+    "artifactName": "${productName}-${version}-${os}-${arch}.${ext}",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "favour187",
+        "repo": "fluxa",
+        "releaseType": "draft"
+      }
+    ],
+    "portable": {
+      "artifactName": "${productName}-${version}-${arch}-portable.${ext}"
+    }
   }
 }

@@ -14,7 +14,16 @@ export default defineConfig({
   fullyParallel: false,
   workers: 1,
   retries: 0,
-  reporter: process.env.CI ? [['list'], ['json', { outputFile: 'test-results/results.json' }]] : [['list']],
+  // CI emits JUnit (for CircleCI test insights), JSON (for reprocessing) and
+  // HTML (for the artifact browser) alongside the plain log.
+  reporter: process.env.CI
+    ? [
+        ['list'],
+        ['junit', { outputFile: 'test-results/junit.xml' }],
+        ['json', { outputFile: 'test-results/results.json' }],
+        ['html', { outputFolder: 'playwright-report', open: 'never' }],
+      ]
+    : [['list']],
   use: {
     baseURL: process.env.FLUXA_BASE_URL ?? 'http://127.0.0.1:8787',
     trace: 'retain-on-failure',
@@ -25,6 +34,9 @@ export default defineConfig({
       args: [
         '--disable-features=WebRtcHideLocalIpsWithMdns',
         '--allow-loopback-in-peer-connection',
+        // Containers ship a tiny /dev/shm; without this Chromium kills renderers
+        // when a large file is read into the page.
+        '--disable-dev-shm-usage',
         '--autoplay-policy=no-user-gesture-required',
         // Lets the large-file test read real JS heap numbers.
         '--enable-precise-memory-info',
