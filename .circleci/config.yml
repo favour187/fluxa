@@ -1,0 +1,662 @@
+version: 2.1
+
+# Fluxa CI/CD
+#
+# Design notes
+# ------------
+# * No orbs, no inline secrets. Everything that needs a credential reads it from
+#   a project environment variable or a CircleCI context (see docs/CI-CD.md).
+# * Every job that produces something stores it with `store_artifacts`, so a run
+#   can be audited after the fact instead of trusting the log tail.
+# * Platform builds run on executors of the matching platform where the toolchain
+#   requires it (Windows -> Windows machine, macOS -> macOS machine). Building a
+#   Windows NSIS installer or a macOS .dmg on a Linux box needs Wine/hdiutil
+#   shims and produces packages we cannot smoke-test; that is why the Linux
+#   executor is not used for those targets here.
+# * Nothing is published automatically. The tag workflow stops at a manual
+#   approval job before it talks to GitHub Releases.
+
+executors:
+  node:
+    docker:
+      - image: cimg/node:20.20.2
+    resource_class: medium
+  browsers:
+    docker:
+      - image: mcr.microsoft.com/playwright:v1.64.1-noble
+    resource_class: medium
+  android:
+    docker:
+      - image: cimg/android:2026.10-node
+    resource_class: large
+  macos:
+    machine:
+      image: xcode:16.4.0
+    resource_class: macos.m1.medium.gen1
+  windows:
+    machine:
+      image: windows-server-2022-gui:current
+    resource_class: windows.medium
+
+commands:
+  restore_npm_cache:
+    parameters:
+      platform:
+        type: string
+        default: linux
+    steps:
+      - restore_cache:
+          keys:
+            - v2-npm-<< parameters.platform >>-{{ checksum "package-lock.json" }}
+            - v2-npm-<< parameters.platform >>-
+  save_npm_cache:
+    parameters:
+      platform:
+        type: string
+        default: linux
+    steps:
+      - save_cache:
+          key: v2-npm-<< parameters.platform >>-{{ checksum "package-lock.json" }}
+          paths:
+            - ~/.npm
+  install_dependencies:
+    description: Lockfile-exact install; fails loudly if the lockfile is stale.
+    steps:
+      - run:
+          name: Install dependencies from lockfile
+          command: npm ci --no-audit --no-fund
+  write_manifest:
+    description: Record version, commit, hashes and signing state for the artifacts.
+    parameters:
+      platform:
+        type: string
+        default: all
+      out:
+        type: string
+        default: artifacts/manifest
+    steps:
+      - run:
+          name: Generate build manifest
+          command: |
+            mkdir -p << parameters.out >>
+            node scripts/build-manifest.mjs --out << parameters.out >> --platform << parameters.platform >>
+  fail_if_no_artifacts:
+    parameters:
+      pattern:
+        type: string
+    steps:
+      - run:
+          name: Assert artifacts exist
+          command: |
+            set -eu
+            found=$(ls << parameters.pattern >> 2>/dev/null | wc -l)
+            if [ "$found" -eq 0 ]; then
+              echo "No artifact matched << parameters.pattern >> — failing instead of reporting an empty build."
+              exit 1
+            fi
+            ls -lh << parameters.pattern >>
+
+jobs:
+  # ---------------------------------------------------------------- Job A ----
+  validate:
+    executor: node
+    steps:
+      - checkout
+      - restore_npm_cache
+      - install_dependencies
+      - save_npm_cache
+      - run:
+          name: Type-check (tsc --noEmit)
+          command: mkdir -p logs && npm run check 2>&1 | tee logs/typecheck.log
+      - run:
+          name: Unit and integration tests (node --test)
+          command: |
+            set -o pipefail
+            mkdir -p logs
+            npm test 2>&1 | tee logs/unit-tests.log
+      - run:
+          name: Production build
+          command: |
+            set -o pipefail
+            npm run build 2>&1 | tee logs/build.log
+      - run:
+          name: Record build output sizes
+          command: ls -lhR dist public | tee logs/build-output.log
+      - store_artifacts:
+          path: logs
+          destination: logs
+      - persist_to_workspace:
+          root: .
+          paths:
+            - dist
+            - public
+
+  # ---------------------------------------------------------------- Job B ----
+  security:
+    executor: node
+    steps:
+      - checkout
+      - restore_npm_cache
+      - install_dependencies
+      - run:
+          name: Audit production dependencies (fails on critical)
+          command: |
+            set -o pipefail
+            mkdir -p logs
+            npm audit --omit=dev --audit-level=critical 2>&1 | tee logs/audit-production.log
+      - run:
+          name: Audit full dependency tree (report only)
+          command: |
+            # Dev-only advisories are reported but do not fail the build: they
+            # cannot ship in the packaged app, and blocking on them would train
+            # us to ignore the signal. Critical advisories in the shipped tree
+            # are handled by the previous step.
+            set -e
+            npm audit --audit-level=critical > logs/audit-all.log 2>&1 || true
+            grep -E "Severity|severity|found [0-9]+" logs/audit-all.log | head -20 || true
+      - run:
+          name: Secret scan (pattern pass over tracked files)
+          command: |
+            set -eu
+            mkdir -p logs
+            # Patterns only — the scanner reports file names and line numbers,
+            # never the matched value.
+            pattern='(ghp_[A-Za-z0-9]{20,}|CCIPAT_[A-Za-z0-9_]{20,}|AKIA[0-9A-Z]{16}|-----BEGIN (RSA |EC |OPENSSH |PGP )?PRIVATE KEY-----|x-access-token:[A-Za-z0-9_]+)'
+            if git grep -nEI "$pattern" -- . ':!docs/CI-CD.md' ':!.circleci/config.yml' > logs/secret-scan.log 2>&1; then
+              echo "Potential secret material found in tracked files:"
+              cut -d: -f1,2 logs/secret-scan.log | sort -u
+              exit 1
+            fi
+            echo "No credential-shaped strings found in tracked files." | tee logs/secret-scan.log
+      - run:
+          name: Verify no keystore or env file is tracked
+          command: |
+            set -eu
+            if git ls-files | grep -Ei '(\.keystore$|\.jks$|keystore\.properties$|^\.env($|\.)|credentials\.txt$)'; then
+              echo "Tracked secret-bearing file detected. Remove it from the index before merging."
+              exit 1
+            fi
+            echo "No signing keys, keystore properties or env files are tracked."
+      - store_artifacts:
+          path: logs
+          destination: security-logs
+
+  # ---------------------------------------------------------------- Job C ----
+  e2e-browser:
+    executor: browsers
+    steps:
+      - checkout
+      - restore_npm_cache
+      - run:
+          name: Install dependencies (browsers come from the Playwright image)
+          command: npm ci --no-audit --no-fund
+      - save_npm_cache
+      - run:
+          name: Build app and static assets
+          command: npm run build
+      - run:
+          name: Two-client browser E2E (pairing, negotiation, transfer, integrity)
+          command: npx playwright test
+          environment:
+            CI: 'true'
+      - store_artifacts:
+          path: test-results
+          destination: e2e-results
+      - store_artifacts:
+          path: playwright-report
+          destination: playwright-report
+      - store_test_results:
+          path: test-results
+          when: always
+
+  e2e-desktop:
+    executor: browsers
+    steps:
+      - checkout
+      - restore_npm_cache
+      - run:
+          name: Install dependencies
+          command: npm ci --no-audit --no-fund
+      - save_npm_cache
+      - run:
+          name: Build bundled app
+          command: npm run build
+      - run:
+          name: Electron E2E under Xvfb (bridge, discovery, real 1 MB transfer)
+          command: xvfb-run -a npx playwright test -c e2e-desktop/playwright.desktop.config.ts
+          environment:
+            CI: 'true'
+      - store_artifacts:
+          path: test-results
+          destination: desktop-e2e-results
+
+  # ---------------------------------------------------------------- Job D ----
+  build-web:
+    executor: node
+    steps:
+      - checkout
+      - restore_npm_cache
+      - install_dependencies
+      - save_npm_cache
+      - run:
+          name: Build static web bundle
+          command: npm run build
+      - run:
+          name: Package web build
+          command: |
+            set -eu
+            version=$(node -p "require('./package.json').version")
+            mkdir -p artifacts/web
+            # public/ holds the HTML/CSS and dist/client the compiled bundles.
+            cp -r public artifacts/web/public
+            cp -r dist artifacts/web/dist
+            cp package.json LICENSE artifacts/web/
+            (cd artifacts/web && zip -qr "../Fluxa-${version}-web.zip" .)
+            ls -lh "artifacts/Fluxa-${version}-web.zip"
+      - write_manifest:
+          platform: web
+          out: artifacts/manifest
+      - fail_if_no_artifacts:
+          pattern: artifacts/*.zip
+      - store_artifacts:
+          path: artifacts
+          destination: web
+      - persist_to_workspace:
+          root: .
+          paths:
+            - artifacts
+
+  build-linux:
+    executor: node
+    steps:
+      - checkout
+      - restore_npm_cache
+      - install_dependencies
+      - save_npm_cache
+      - run:
+          name: Build AppImage and deb
+          command: |
+            set -o pipefail
+            npm run build
+            npx electron-builder --linux AppImage deb --publish never 2>&1 | tee build-linux.log
+      - fail_if_no_artifacts:
+          pattern: 'release/*.AppImage release/*.deb'
+      - write_manifest:
+          platform: linux
+          out: artifacts/manifest
+      - store_artifacts:
+          path: release
+          destination: linux
+      - store_artifacts:
+          path: artifacts/manifest
+          destination: linux-manifest
+      - persist_to_workspace:
+          root: .
+          paths:
+            - release
+            - artifacts
+
+  build-windows:
+    executor: windows
+    shell: bash.exe -eo pipefail
+    steps:
+      - checkout
+      - restore_npm_cache:
+          platform: windows
+      - run:
+          name: Toolchain check
+          command: |
+            node --version
+            npm --version
+            echo "shell: $BASH_VERSION"
+      - install_dependencies
+      - save_npm_cache:
+          platform: windows
+      - run:
+          name: Build NSIS installer and portable executable
+          command: |
+            npm run build
+            npx electron-builder --win nsis portable --publish never
+      - run:
+          name: Verify installer metadata
+          command: |
+            set -eu
+            ls -lh release/*.exe
+            # Confirm the packaged binary carries our version resource, not a stub.
+            node -e "
+              const fs=require('fs');
+              const p='release/win-unpacked/Fluxa.exe';
+              if(!fs.existsSync(p)){console.error('Fluxa.exe missing');process.exit(1);}
+              const s=fs.readFileSync(p).toString('latin1');
+              const v=require('./package.json').version;
+              const wide=[...v].join('\u0000');
+              if(!s.includes(wide)){console.error('version '+v+' not found in exe resources');process.exit(1);}
+              console.log('version resource '+v+' present in Fluxa.exe');
+            "
+      - write_manifest:
+          platform: windows
+          out: artifacts/manifest
+      - fail_if_no_artifacts:
+          pattern: release/*.exe
+      - store_artifacts:
+          path: release
+          destination: windows
+      - store_artifacts:
+          path: artifacts/manifest
+          destination: windows-manifest
+      - persist_to_workspace:
+          root: .
+          paths:
+            - release
+            - artifacts
+
+  build-macos:
+    executor: macos
+    steps:
+      - checkout
+      - restore_npm_cache:
+          platform: macos
+      - install_dependencies
+      - save_npm_cache:
+          platform: macos
+      - run:
+          name: Build .app, dmg and zip
+          command: |
+            set -o pipefail
+            npm run build
+            # No Developer ID certificate is configured here, so make it explicit
+            # rather than letting electron-builder probe for one.
+            CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac dmg zip --publish never 2>&1 | tee build-macos.log
+      - run:
+          name: Verify bundle metadata
+          command: |
+            set -eu
+            APP="release/mac/Fluxa.app"
+            [ -d "$APP" ] || APP="release/mac-arm64/Fluxa.app"
+            /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Contents/Info.plist"
+            /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist"
+            ls -lh release/*.dmg release/*.zip
+      - fail_if_no_artifacts:
+          pattern: 'release/*.dmg'
+      - write_manifest:
+          platform: macos
+          out: artifacts/manifest
+      - store_artifacts:
+          path: release
+          destination: macos
+      - store_artifacts:
+          path: artifacts/manifest
+          destination: macos-manifest
+      - persist_to_workspace:
+          root: .
+          paths:
+            - release
+            - artifacts
+
+  build-android:
+    executor: android
+    steps:
+      - checkout
+      - restore_npm_cache:
+          platform: android
+      - install_dependencies
+      - save_npm_cache:
+          platform: android
+      - restore_cache:
+          keys:
+            - v2-gradle-{{ checksum "android/version.properties" }}
+            - v2-gradle-
+      - run:
+          name: Sync web assets, version metadata and icons into the Android project
+          command: |
+            set -o pipefail
+            echo "ANDROID_HOME=$ANDROID_HOME ANDROID_SDK_ROOT=$ANDROID_SDK_ROOT"
+            node scripts/sync-android.mjs 2>&1 | tee sync-android.log
+      - run:
+          name: Configure release signing (only when the key is provided)
+          command: |
+            set -eu
+            if [ -n "${FLUXA_ANDROID_KEYSTORE_B64:-}" ]; then
+              # Decoded to a temp file outside the repo and never echoed.
+              install -m 600 /dev/null "$HOME/fluxa-release.keystore"
+              printf '%s' "$FLUXA_ANDROID_KEYSTORE_B64" | base64 -d > "$HOME/fluxa-release.keystore"
+              keytool -list -keystore "$HOME/fluxa-release.keystore" -storepass "$FLUXA_ANDROID_STORE_PASSWORD" >/dev/null
+              {
+                echo "storeFile=$HOME/fluxa-release.keystore"
+                echo "storePassword=$FLUXA_ANDROID_STORE_PASSWORD"
+                echo "keyAlias=$FLUXA_ANDROID_KEY_ALIAS"
+                echo "keyPassword=$FLUXA_ANDROID_KEY_PASSWORD"
+              } > android/keystore.properties
+              chmod 600 android/keystore.properties
+              echo "Release signing configured from project environment variables."
+            else
+              rm -f android/keystore.properties
+              echo "FLUXA_ANDROID_KEYSTORE_B64 is not set: this run produces an UNSIGNED release APK (test build only)."
+            fi
+      - run:
+          name: Assemble release APK and App Bundle
+          command: |
+            set -o pipefail
+            cd android
+            ./gradlew --no-daemon --max-workers=2 assembleRelease bundleRelease 2>&1 | tee ../android-build.log
+      - save_cache:
+          key: v2-gradle-{{ checksum "android/version.properties" }}
+          paths:
+            - ~/.gradle/caches
+            - ~/.gradle/wrapper
+      - run:
+          name: Verify package identity and signature
+          command: |
+            set -eu
+            APK=$(ls android/app/build/outputs/apk/release/*.apk | head -1)
+            AAB=$(ls android/app/build/outputs/bundle/release/*.aab | head -1)
+            echo "APK: $APK"
+            echo "AAB: $AAB"
+            "$ANDROID_HOME"/build-tools/*/aapt2 dump badging "$APK" | grep -E "^package:|application-label:|uses-permission:" 
+            if [ -n "${FLUXA_ANDROID_KEYSTORE_B64:-}" ]; then
+              "$ANDROID_HOME"/build-tools/*/apksigner verify --verbose "$APK"
+            else
+              echo "Unsigned build: skipping apksigner verification (this is a test artifact)."
+            fi
+            # No source maps inside the shipped package.
+            if unzip -l "$APK" | grep -q '\.map$'; then
+              echo "source maps leaked into the APK"; exit 1
+            fi
+      - run:
+          name: Remove decoded signing key from the workspace
+          when: always
+          command: rm -f "$HOME/fluxa-release.keystore" android/keystore.properties
+      - write_manifest:
+          platform: android
+          out: artifacts/manifest
+      - fail_if_no_artifacts:
+          pattern: 'android/app/build/outputs/apk/release/*.apk'
+      - store_artifacts:
+          path: android/app/build/outputs/apk/release
+          destination: android-apk
+      - store_artifacts:
+          path: android/app/build/outputs/bundle/release
+          destination: android-aab
+      - store_artifacts:
+          path: artifacts/manifest
+          destination: android-manifest
+      - persist_to_workspace:
+          root: .
+          paths:
+            - android/app/build/outputs
+            - artifacts
+
+  # ------------------------------------------------------------- Release ----
+  hold-for-release:
+    type: approval
+    requires:
+      - validate
+      - security
+      - e2e-browser
+      - e2e-desktop
+
+  publish-github-release:
+    executor: node
+    steps:
+      - checkout
+      - attach_workspace:
+          at: .
+      - run:
+          name: Collect artifacts and checksums
+          command: |
+            set -eu
+            mkdir -p publish
+            shopt -s nullglob
+            for f in release/*.AppImage release/*.deb release/*.exe release/*.dmg release/*.zip \
+                     android/app/build/outputs/apk/release/*.apk \
+                     android/app/build/outputs/bundle/release/*.aab; do
+              [ -f "$f" ] && cp "$f" publish/
+            done
+            (cd publish && sha256sum * > SHA256SUMS)
+            cp artifacts/manifest/build-manifest.json publish/ 2>/dev/null || true
+            ls -lh publish
+      - run:
+          name: Create GitHub release and attach artifacts
+          command: |
+            set -eu
+            if [ -z "${GH_RELEASE_TOKEN:-}" ]; then
+              echo "GH_RELEASE_TOKEN is not set for this project/context."
+              echo "Artifacts stay on this CircleCI job; nothing is published."
+              echo "See docs/CI-CD.md#github-releases for the required token scope (contents: write)."
+              exit 0
+            fi
+            VERSION=$(node -p "require('./package.json').version")
+            TAG="${CIRCLE_TAG:-v$VERSION}"
+            echo "Publishing $TAG from commit $CIRCLE_SHA1"
+            # Create (or reuse) the draft release, then upload every asset.
+            release_id=$(curl -sS -X POST \
+              -H "Authorization: Bearer $GH_RELEASE_TOKEN" \
+              -H "Accept: application/vnd.github+json" \
+              "https://api.github.com/repos/favour187/fluxa/releases" \
+              -d "{\"tag_name\":\"$TAG\",\"name\":\"Fluxa $VERSION\",\"draft\":true,\"generate_release_notes\":true,\"prerelease\":false}" \
+              | node -e "let d='';process.stdin.on('data',c=>d+=c).on('end',()=>{const j=JSON.parse(d);if(j.id){console.log(j.id)}else{console.error(JSON.stringify(j));process.exit(1)}})")
+            echo "release id $release_id"
+            for f in publish/*; do
+              name=$(basename "$f")
+              echo "uploading $name"
+              curl -sS -X POST \
+                -H "Authorization: Bearer $GH_RELEASE_TOKEN" \
+                -H "Content-Type: application/octet-stream" \
+                --data-binary "@$f" \
+                "https://uploads.github.com/repos/favour187/fluxa/releases/$release_id/assets?name=$name" >/dev/null
+            done
+            echo "Draft release created with $(ls publish | wc -l) files. Review and publish manually on GitHub."
+      - store_artifacts:
+          path: publish
+          destination: release
+
+workflows:
+  # Runs on every branch push (including pull request branches): correctness,
+  # security and the browser-level end-to-end suite plus the web bundle.
+  pull-request:
+    jobs:
+      - validate
+      - security
+      - e2e-browser
+      - e2e-desktop
+      - build-web
+      - build-linux:
+          requires:
+            - validate
+
+  # Default branch: the same checks plus real packages for every platform whose
+  # toolchain this project actually drives.
+  main:
+    jobs:
+      - validate:
+          filters:
+            branches:
+              only: main
+      - security:
+          filters:
+            branches:
+              only: main
+      - e2e-browser:
+          filters:
+            branches:
+              only: main
+      - e2e-desktop:
+          filters:
+            branches:
+              only: main
+      - build-web:
+          requires:
+            - validate
+          filters:
+            branches:
+              only: main
+      - build-linux:
+          requires:
+            - validate
+          filters:
+            branches:
+              only: main
+      - build-windows:
+          requires:
+            - validate
+          filters:
+            branches:
+              only: main
+      - build-android:
+          requires:
+            - validate
+          filters:
+            branches:
+              only: main
+      - build-macos:
+          requires:
+            - validate
+          filters:
+            branches:
+              only: main
+
+  # Version tags: full test gate, then a manual approval before anything is
+  # published. No store upload happens from CI at all.
+  release:
+    jobs:
+      - validate:
+          filters: &tag-only
+            branches:
+              ignore: /.*/
+            tags:
+              only: /^v[0-9]+\.[0-9]+\.[0-9]+.*/
+      - security:
+          filters: *tag-only
+      - e2e-browser:
+          filters: *tag-only
+      - e2e-desktop:
+          filters: *tag-only
+      - build-web:
+          requires: [validate]
+          filters: *tag-only
+      - build-linux:
+          requires: [validate, e2e-browser]
+          filters: *tag-only
+      - build-windows:
+          requires: [validate, e2e-desktop]
+          filters: *tag-only
+      - build-android:
+          requires: [validate]
+          filters: *tag-only
+      - build-macos:
+          requires: [validate]
+          filters: *tag-only
+      - hold-for-release:
+          type: approval
+          requires:
+            - build-web
+            - build-linux
+            - build-windows
+            - build-android
+            - build-macos
+          filters: *tag-only
+      - publish-github-release:
+          requires: [hold-for-release]
+          filters: *tag-only
+          context:
+            - fluxa-release
