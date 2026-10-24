@@ -630,7 +630,28 @@ export class FluxaUI {
   private openOverlay(): HTMLElement {
     const overlay = this.q('#overlay');
     overlay.classList.add('active');
+    if (!overlay.dataset.bound) {
+      overlay.dataset.bound = '1';
+      overlay.addEventListener('keydown', (event) => this.onOverlayKeydown(event as KeyboardEvent));
+    }
     return overlay;
+  }
+
+  private onOverlayKeydown(event: KeyboardEvent): void {
+    if (event.key !== 'Escape') return;
+    // An incoming transfer needs an explicit decision, so Escape never dismisses it.
+    if (this.q('#overlay').querySelector('[data-testid="incoming-modal"]')) return;
+    event.preventDefault();
+    const open = this.q('#overlay').querySelector<HTMLElement>('.modal');
+    if (!open) return;
+    if (open === this.verifyModal) {
+      const session = this.snapshot?.verification;
+      if (session?.sas) this.deferredVerifications.add(`${session.deviceId}:${session.sas}`);
+    }
+    if (open === this.pairingModal) this.app.cancelPairing();
+    this.closeModal(open);
+    const focusTarget = this.root.querySelector<HTMLElement>(open.dataset.returnFocus ?? '#pair-btn');
+    focusTarget?.focus();
   }
 
   /** Remove a single dialog, leaving any other open dialog untouched. */
@@ -893,6 +914,10 @@ export class FluxaUI {
       <div class="kv"><span>Device ID</span><code data-testid="device-id">${esc(identity?.deviceId.slice(0, 22) ?? '')}…</code></div>
       <div class="kv column"><span>Identity fingerprint (SHA-256)</span><code class="fingerprint">${esc(identity?.fingerprint ?? '')}</code></div>
       <p class="muted tiny">Paired devices pin this key. If the key ever changes, the pairing is refused — clear site data only if you intentionally reinstall Fluxa.</p>
+      <label class="switch-row">
+        <input type="checkbox" id="reduce-motion" data-testid="reduce-motion" ${document.documentElement.dataset.reducedMotion === 'true' ? 'checked' : ''}/>
+        <span>Reduce motion (disables ambient and progress animations)</span>
+      </label>
       <div class="modal-actions column-actions">
         <button class="btn btn-ghost" id="clear-received" type="button">Clear received files stored by this browser</button>
       </div>`;
@@ -907,6 +932,15 @@ export class FluxaUI {
     modal.querySelector('#clear-received')!.addEventListener('click', () => {
       void this.app.clearReceivedStorage();
       this.closeOverlay();
+    });
+    const reduceMotion = modal.querySelector<HTMLInputElement>('#reduce-motion')!;
+    reduceMotion.addEventListener('change', () => {
+      document.documentElement.dataset.reducedMotion = reduceMotion.checked ? 'true' : 'false';
+      try {
+        localStorage.setItem('fluxa:reduced-motion', reduceMotion.checked ? 'true' : 'false');
+      } catch {
+        /* storage may be unavailable; the setting simply does not persist */
+      }
     });
     overlay.append(modal);
     this.settingsModal = modal;

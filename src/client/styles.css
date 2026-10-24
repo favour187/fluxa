@@ -1139,6 +1139,24 @@ code {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.switch-row {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  font-size: 12.5px;
+  color: var(--muted);
+  padding: 10px 0;
+  border-top: 1px solid rgba(255, 255, 255, 0.05);
+  border-bottom: 1px solid rgba(255, 255, 255, 0.05);
+  cursor: pointer;
+}
+.switch-row input {
+  margin-top: 2px;
+  accent-color: var(--brand-1);
+  width: 16px;
+  height: 16px;
+}
+
 .settings-form {
   display: flex;
   flex-direction: column;

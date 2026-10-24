@@ -23,6 +23,13 @@ async function boot(): Promise<void> {
   ui.mount();
 
   try {
+    const reduced = localStorage.getItem('fluxa:reduced-motion');
+    if (reduced) document.documentElement.dataset.reducedMotion = reduced;
+  } catch {
+    /* private mode without storage: fall back to the OS-level preference */
+  }
+
+  try {
     await app.init();
   } catch (err) {
     const message = document.createElement('div');
