@@ -513,9 +513,13 @@ jobs:
             AAB=$(ls android/app/build/outputs/bundle/release/*.aab | head -1)
             echo "APK: $APK"
             echo "AAB: $AAB"
-            "$ANDROID_HOME"/build-tools/*/aapt2 dump badging "$APK" | grep -E "^package:|application-label:|uses-permission:" 
+            # More than one build-tools version can be installed: pick the newest
+            # instead of letting the glob expand into an argument list.
+            BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
+            echo "build-tools: $BT"
+            "$BT/aapt2" dump badging "$APK" | grep -E "^package:|application-label:|uses-permission:"
             if [ -n "${FLUXA_ANDROID_KEYSTORE_B64:-}" ]; then
-              "$ANDROID_HOME"/build-tools/*/apksigner verify --verbose "$APK"
+              "$BT/apksigner" verify --verbose --print-certs "$APK" | grep -E "Verified using|Signer #1 certificate DN"
             else
               echo "Unsigned build: skipping apksigner verification (this is a test artifact)."
             fi
@@ -737,8 +741,10 @@ workflows:
             - build-android
             - build-macos-unsigned
           filters: *tag-only
+      # Reads GH_RELEASE_TOKEN from the project environment variables. A context
+      # works too: create one and add `context: [fluxa-release]` here. It is left
+      # unbound so a missing context cannot fail an otherwise approved release —
+      # the job simply reports that it has no token and skips publishing.
       - publish-github-release:
           requires: [hold-for-release]
           filters: *tag-only
-          context:
-            - fluxa-release

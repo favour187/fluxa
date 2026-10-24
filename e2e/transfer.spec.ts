@@ -147,12 +147,29 @@ test('cancelling mid-transfer stops both sides and produces no file', async () =
   // is closer to what a user drops on the window anyway.
   const dir = await mkdtemp(join(tmpdir(), 'fluxa-cancel-'));
   const bigPath = join(dir, 'big-cancel.bin');
-  await writeFile(bigPath, randomBytes(24 * 1024 * 1024));
+  // Large enough that the transfer is still running when Cancel is clicked, even
+  // on a fast CI box where a 20 MB file finishes in a few hundred milliseconds.
+  await writeFile(bigPath, randomBytes(128 * 1024 * 1024));
   await a.page.getByTestId('file-input').setInputFiles([bigPath]);
   await b.page.getByTestId('accept-transfer').click();
   await waitForState(a.page, 'transferring');
 
-  await a.page.getByTestId('cancel-transfer').click();
+  // The row is re-rendered as progress arrives, so a single click can land on a
+  // detached node. Keep clicking while the transfer is live and assert that it
+  // really ends up cancelled rather than quietly completing.
+  await expect
+    .poll(
+      async () => {
+        const button = a.page.getByTestId('cancel-transfer');
+        if ((await button.count()) === 0) {
+          return a.page.getByTestId('transfer-item').first().getAttribute('data-state');
+        }
+        await button.first().click({ timeout: 1_000 }).catch(() => undefined);
+        return a.page.getByTestId('transfer-item').first().getAttribute('data-state').catch(() => null);
+      },
+      { timeout: 30_000, intervals: [100, 150, 250] },
+    )
+    .toBe('cancelled');
 
   await waitForState(a.page, 'cancelled', 30_000);
   await waitForState(b.page, 'cancelled', 30_000);
