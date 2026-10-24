@@ -26,6 +26,21 @@ The `main` workflow ran green for commit `70daec2`:
 Everything above was executed by CircleCI, not locally. The jobs that could not
 run are called out rather than silently skipped.
 
+### Release workflow (`v0.2.0`, commit `d142da6`)
+
+The tag pipeline ran the same test gate and every platform build, then stopped at
+`hold-for-release` (status `on_hold`) until it was approved. After approval:
+
+* `hold-for-release` → success
+* `publish-github-release` → success; it assembled
+  `Fluxa-0.2.0-{web.zip, linux-x86_64.AppImage, linux-amd64.deb, x64-setup.exe,
+  x64-portable.exe, mac-x64.zip, release.apk, release.aab}`, one
+  `build-manifest-<platform>.json` per job and a single `SHA256SUMS`, then
+  reported `GH_RELEASE_TOKEN is not set … nothing is published` and exited 0.
+
+So the gate, the artifact assembly and the checksum generation are proven; only
+the final GitHub API call is waiting on a token you own.
+
 ## Workflows
 
 | Workflow | Trigger | Jobs |
