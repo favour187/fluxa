@@ -1,0 +1,31 @@
+{
+  "name": "fluxa",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "Fluxa — move anything. anywhere. Cross-device transfer app (browser reference implementation).",
+  "engines": {
+    "node": ">=20"
+  },
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "start": "node dist/server/index.js",
+    "serve": "node dist/server/index.js",
+    "check": "tsc --noEmit",
+    "test": "node scripts/build.mjs && node --test dist/test/unit/",
+    "test:unit": "node scripts/build.mjs && node --test dist/test/unit/",
+    "test:e2e": "node scripts/build.mjs && playwright test",
+    "verify": "npm run check && npm test"
+  },
+  "dependencies": {
+    "qrcode-generator": "^1.5.2",
+    "ws": "^8.22.0"
+  },
+  "devDependencies": {
+    "@playwright/test": "^1.64.1",
+    "@types/node": "^22.20.5",
+    "@types/ws": "^8.18.2",
+    "esbuild": "^0.28.2",
+    "typescript": "^5.9.3"
+  }
+}
