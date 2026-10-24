@@ -19,9 +19,12 @@
 import { createHash } from 'node:crypto';
 import { execFileSync } from 'node:child_process';
 import { mkdir, readFile, readdir, stat, writeFile } from 'node:fs/promises';
-import { basename, extname, join, relative, resolve } from 'node:path';
+import { basename, dirname, extname, join, relative, resolve } from 'node:path';
+import { fileURLToPath } from 'node:url';
 
-const REPO_ROOT = resolve(new URL('..', import.meta.url).pathname);
+// fileURLToPath (not URL.pathname) so this also works on Windows, where the
+// pathname would come back as "/C:/..." and every fs call would fail.
+const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
 /** Directories that electron-builder / Gradle write into. */
 const DEFAULT_SCAN_DIRS = [

@@ -1,5 +1,13 @@
 version: 2.1
 
+parameters:
+  # The macOS executor is not included in every CircleCI plan. When it is
+  # available, trigger with {"macos_runner": true} and the signed-capable job
+  # runs; otherwise the unsigned Linux-built zip is what CI produces.
+  macos_runner:
+    type: boolean
+    default: false
+
 # Fluxa CI/CD
 #
 # Design notes
@@ -350,7 +358,60 @@ jobs:
             - release
             - artifacts
 
+  build-macos-unsigned:
+    description: >-
+      Produces Fluxa-<version>-mac-<arch>.zip on Linux with electron-builder.
+      The bundle is unsigned and cannot be notarised from here; it exists so a
+      macOS-shaped artifact is available without a macOS executor. Distribution
+      still requires build-macos on a Mac plus a Developer ID certificate.
+    executor: node
+    steps:
+      - checkout
+      - restore_npm_cache
+      - install_dependencies
+      - save_npm_cache
+      - run:
+          name: Build unsigned macOS zip
+          command: |
+            set -o pipefail
+            npm run build
+            CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac zip --publish never 2>&1 | tee build-macos.log
+      - run:
+          name: Verify bundle identifiers inside the archive
+          command: |
+            set -eu
+            APP="release/mac/Fluxa.app"
+            [ -d "$APP" ] || APP="release/mac-arm64/Fluxa.app"
+            node -e "
+              const fs=require('fs');
+              const info=fs.readFileSync(process.argv[1]+'/Contents/Info.plist','utf8');
+              const version=require('./package.json').version;
+              for (const [key, want] of [['CFBundleIdentifier','com.fluxa.transfer'],['CFBundleShortVersionString',version],['CFBundleName','Fluxa']]) {
+                const m=info.match(new RegExp('<key>'+key+'</key>\\s*<string>([^<]*)</string>'));
+                if (!m || m[1]!==want) { console.error(key+' expected '+want+' got '+(m&&m[1])); process.exit(1); }
+                console.log(key+'='+m[1]);
+              }
+            " "$APP"
+            ls -lh release/*.zip
+      - fail_if_no_artifacts:
+          pattern: 'release/*mac*.zip'
+      - write_manifest:
+          platform: macos-unsigned
+          out: artifacts/manifest
+      - store_artifacts:
+          path: release
+          destination: macos-unsigned
+      - store_artifacts:
+          path: artifacts/manifest
+          destination: macos-unsigned-manifest
+      - persist_to_workspace:
+          root: .
+          paths:
+            - release
+            - artifacts
+
   build-macos:
+    description: Real macOS job (dmg + zip) — requires a plan with macOS executors.
     executor: macos
     steps:
       - checkout
@@ -555,14 +616,22 @@ workflows:
   # security and the browser-level end-to-end suite plus the web bundle.
   pull-request:
     jobs:
-      - validate
-      - security
-      - e2e-browser
-      - e2e-desktop
-      - build-web
+      - validate:
+          filters: &not-main
+            branches:
+              ignore: main
+      - security:
+          filters: *not-main
+      - e2e-browser:
+          filters: *not-main
+      - e2e-desktop:
+          filters: *not-main
+      - build-web:
+          filters: *not-main
       - build-linux:
           requires:
             - validate
+          filters: *not-main
 
   # Default branch: the same checks plus real packages for every platform whose
   # toolchain this project actually drives.
@@ -608,12 +677,25 @@ workflows:
           filters:
             branches:
               only: main
-      - build-macos:
+      - build-macos-unsigned:
           requires:
             - validate
           filters:
             branches:
               only: main
+
+  # Only runs when the pipeline is triggered with {"macos_runner": true}, which
+  # requires a plan that includes macOS executors. CI stays green on plans that
+  # do not, while the job itself is real rather than decorative.
+  native-macos:
+    when: << pipeline.parameters.macos_runner >>
+    jobs:
+      - build-macos:
+          filters:
+            branches:
+              only: main
+            tags:
+              only: /^v[0-9]+\.[0-9]+\.[0-9]+.*/
 
   # Version tags: full test gate, then a manual approval before anything is
   # published. No store upload happens from CI at all.
@@ -643,7 +725,7 @@ workflows:
       - build-android:
           requires: [validate]
           filters: *tag-only
-      - build-macos:
+      - build-macos-unsigned:
           requires: [validate]
           filters: *tag-only
       - hold-for-release:
@@ -653,7 +735,7 @@ workflows:
             - build-linux
             - build-windows
             - build-android
-            - build-macos
+            - build-macos-unsigned
           filters: *tag-only
       - publish-github-release:
           requires: [hold-for-release]
