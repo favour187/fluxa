@@ -6,7 +6,6 @@ dist/
 /public/
 release/
 artifacts/
-build/android/
 test-results/
 playwright-report/
 blob-report/

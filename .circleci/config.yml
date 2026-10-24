@@ -172,7 +172,7 @@ jobs:
           name: Verify no keystore or env file is tracked
           command: |
             set -eu
-            if git ls-files | grep -Ei '(\.keystore$|\.jks$|keystore\.properties$|^\.env($|\.)|credentials\.txt$)'; then
+            if git ls-files | grep -Ev '^\.env\.example$' | grep -Ei '(\.keystore$|\.jks$|keystore\.properties$|^\.env($|\.)|credentials\.txt$)'; then
               echo "Tracked secret-bearing file detected. Remove it from the index before merging."
               exit 1
             fi

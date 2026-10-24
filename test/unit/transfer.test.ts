@@ -204,6 +204,9 @@ test('a multi-file transfer completes with matching hashes', async () => {
   const incoming = h.incomingB() as unknown as { files: { descriptor: { name: string } }[] };
   assert.equal(incoming.files.length, 3);
 
+  // The receiver's own 'finished' event can land a tick after the sender sees the
+  // final ack, so wait for it instead of assuming ordering.
+  await waitFor(() => h.finishedB.length > 0, 5_000, 'receiver settles');
   const receiverFinish = h.finishedB.at(-1)!;
   assert.equal(receiverFinish.task.state, 'complete');
   assert.equal(receiverFinish.files.length, 3);
@@ -354,6 +357,8 @@ test('received bytes hash to the original file', async () => {
   const source = new File([bytes], 'verify.bin', { type: 'application/octet-stream' });
   const task = h.a.send([source]);
   await waitFor(() => task.state === 'complete', 20_000, 'completion');
+  // Same ordering caveat as above: the sender can observe 'complete' first.
+  await waitFor(() => h.finishedB.length > 0, 5_000, 'receiver settles');
   const finished = h.finishedB.at(-1)!;
   const received = finished.files[0]! as unknown as { blob: Blob | null; sha256: string };
   assert.ok(received.blob, 'a memory sink keeps the bytes for saving');
