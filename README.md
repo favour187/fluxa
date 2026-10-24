@@ -12,6 +12,14 @@ This repository is a **real implementation with a verified end-to-end transfer
 path** — not a mock. It is also deliberately honest about what is *not* built yet;
 see [Capability matrix](#capability-matrix).
 
+![Fluxa — a completed transfer, with the receiving device showing a verified connection and SHA-256-checked file](docs/screenshots/received.png)
+
+<sub>Real screenshots from the running app (two browser profiles, 8 MB / 3-file
+transfer). Also: [pairing](docs/screenshots/pairing.png) ·
+[key verification](docs/screenshots/verify.png) ·
+[incoming transfer](docs/screenshots/incoming.png) ·
+[mid-transfer progress](docs/screenshots/transferring.png)</sub>
+
 ---
 
 ## Quick start

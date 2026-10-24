@@ -400,7 +400,12 @@ export async function startServer(config: ServerConfig): Promise<FluxaServer> {
         const ok = Boolean(msg['ok']);
         const link = client.targets.get(targetConn);
         if (!link) return sendErr(client, 'unknown_peer', 'no such session');
-        if (link.confirmed) return sendErr(client, 'already_verified', 'session already verified');
+        if (link.confirmed && ok) {
+          // Both devices usually confirm within the same second; a repeated
+          // confirmation must be idempotent rather than an error.
+          send(client, { t: 'verified', peer: publicLink(link) });
+          return;
+        }
         const peer = clients.get(targetConn);
         if (!peer) return sendErr(client, 'peer_left', 'the other device disconnected');
         if (!ok) {

@@ -327,7 +327,11 @@ export class FluxaUI {
           el(
             'span',
             `path ${session.connection.direct ? 'direct' : 'relay'}`,
-            session.connection.direct ? `Direct ${session.connection.type}` : 'Relayed',
+            session.connection.direct
+              ? session.connection.type === 'host'
+                ? 'Direct'
+                : `Direct (${session.connection.type})`
+              : 'Relayed',
           ),
         );
       }
