@@ -254,21 +254,20 @@ jobs:
           command: |
             set -eu
             version=$(node -p "require('./package.json').version")
-            mkdir -p artifacts/web
-            # public/ holds the HTML/CSS and dist/client the compiled bundles.
-            cp -r public artifacts/web/public
-            cp -r dist artifacts/web/dist
-            cp package.json LICENSE artifacts/web/
-            (cd artifacts/web && zip -qr "../Fluxa-${version}-web.zip" .)
-            ls -lh "artifacts/Fluxa-${version}-web.zip"
+            mkdir -p artifacts/web staging
+            # public/ holds the HTML/CSS and dist/ the compiled bundles.
+            cp -r public/. staging/
+            cp -r dist/. staging/
+            cp package.json LICENSE staging/
+            (cd staging && zip -qr "../artifacts/web/Fluxa-${version}-web.zip" .)
+            rm -rf staging
+            ls -lh artifacts/web/
       - run:
           name: Generate build manifest
           command: |
-            mkdir -p artifacts/manifest
-            node scripts/build-manifest.mjs --out artifacts/manifest --platform web \
-              --include "artifacts/Fluxa-$(node -p "require('./package.json').version")-web.zip"
+            node scripts/build-manifest.mjs --out artifacts/manifest-web --platform web
       - fail_if_no_artifacts:
-          pattern: artifacts/*.zip
+          pattern: artifacts/web/*.zip
       - store_artifacts:
           path: artifacts
           destination: web
@@ -289,22 +288,26 @@ jobs:
           command: |
             set -o pipefail
             npm run build
-            npx electron-builder --linux AppImage deb --publish never 2>&1 | tee build-linux.log
+            # A per-job output directory: several platform jobs persist into the
+            # same workspace, and electron-builder writes shared names like
+            # builder-debug.yml and latest*.yml that would collide.
+            npx electron-builder --linux AppImage deb --publish never \
+              -c.directories.output=dist-linux 2>&1 | tee build-linux.log
       - fail_if_no_artifacts:
-          pattern: 'release/*.AppImage release/*.deb'
+          pattern: 'dist-linux/*.AppImage dist-linux/*.deb'
       - write_manifest:
           platform: linux
-          out: artifacts/manifest
+          out: artifacts/manifest-linux
       - store_artifacts:
-          path: release
+          path: dist-linux
           destination: linux
       - store_artifacts:
-          path: artifacts/manifest
+          path: artifacts/manifest-linux
           destination: linux-manifest
       - persist_to_workspace:
           root: .
           paths:
-            - release
+            - dist-linux
             - artifacts
 
   build-windows:
@@ -327,16 +330,16 @@ jobs:
           name: Build NSIS installer and portable executable
           command: |
             npm run build
-            npx electron-builder --win nsis portable --publish never
+            npx electron-builder --win nsis portable --publish never -c.directories.output=dist-windows
       - run:
           name: Verify installer metadata
           command: |
             set -eu
-            ls -lh release/*.exe
+            ls -lh dist-windows/*.exe
             # Confirm the packaged binary carries our version resource, not a stub.
             node -e "
               const fs=require('fs');
-              const p='release/win-unpacked/Fluxa.exe';
+              const p='dist-windows/win-unpacked/Fluxa.exe';
               if(!fs.existsSync(p)){console.error('Fluxa.exe missing');process.exit(1);}
               const s=fs.readFileSync(p).toString('latin1');
               const v=require('./package.json').version;
@@ -346,19 +349,19 @@ jobs:
             "
       - write_manifest:
           platform: windows
-          out: artifacts/manifest
+          out: artifacts/manifest-windows
       - fail_if_no_artifacts:
-          pattern: release/*.exe
+          pattern: dist-windows/*.exe
       - store_artifacts:
-          path: release
+          path: dist-windows
           destination: windows
       - store_artifacts:
-          path: artifacts/manifest
+          path: artifacts/manifest-windows
           destination: windows-manifest
       - persist_to_workspace:
           root: .
           paths:
-            - release
+            - dist-windows
             - artifacts
 
   build-macos-unsigned:
@@ -378,13 +381,14 @@ jobs:
           command: |
             set -o pipefail
             npm run build
-            CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac zip --publish never 2>&1 | tee build-macos.log
+            CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac zip --publish never \
+              -c.directories.output=dist-macos 2>&1 | tee build-macos.log
       - run:
           name: Verify bundle identifiers inside the archive
           command: |
             set -eu
-            APP="release/mac/Fluxa.app"
-            [ -d "$APP" ] || APP="release/mac-arm64/Fluxa.app"
+            APP="dist-macos/mac/Fluxa.app"
+            [ -d "$APP" ] || APP="dist-macos/mac-arm64/Fluxa.app"
             node -e "
               const fs=require('fs');
               const info=fs.readFileSync(process.argv[1]+'/Contents/Info.plist','utf8');
@@ -395,22 +399,22 @@ jobs:
                 console.log(key+'='+m[1]);
               }
             " "$APP"
-            ls -lh release/*.zip
+            ls -lh dist-macos/*.zip
       - fail_if_no_artifacts:
-          pattern: 'release/*mac*.zip'
+          pattern: 'dist-macos/*mac*.zip'
       - write_manifest:
           platform: macos-unsigned
-          out: artifacts/manifest
+          out: artifacts/manifest-macos
       - store_artifacts:
-          path: release
+          path: dist-macos
           destination: macos-unsigned
       - store_artifacts:
-          path: artifacts/manifest
+          path: artifacts/manifest-macos
           destination: macos-unsigned-manifest
       - persist_to_workspace:
           root: .
           paths:
-            - release
+            - dist-macos
             - artifacts
 
   build-macos:
@@ -430,31 +434,35 @@ jobs:
             npm run build
             # No Developer ID certificate is configured here, so make it explicit
             # rather than letting electron-builder probe for one.
-            CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac dmg zip --publish never 2>&1 | tee build-macos.log
+            CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac dmg zip --publish never \
+              -c.directories.output=dist-macos 2>&1 | tee build-macos.log
       - run:
           name: Verify bundle metadata
           command: |
             set -eu
-            APP="release/mac/Fluxa.app"
-            [ -d "$APP" ] || APP="release/mac-arm64/Fluxa.app"
+            APP="dist-macos/mac/Fluxa.app"
+            [ -d "$APP" ] || APP="dist-macos/mac-arm64/Fluxa.app"
             /usr/libexec/PlistBuddy -c "Print :CFBundleIdentifier" "$APP/Contents/Info.plist"
             /usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" "$APP/Contents/Info.plist"
-            ls -lh release/*.dmg release/*.zip
+            ls -lh dist-macos/*.dmg dist-macos/*.zip
       - fail_if_no_artifacts:
-          pattern: 'release/*.dmg'
+          pattern: 'dist-macos/*.dmg'
       - write_manifest:
           platform: macos
-          out: artifacts/manifest
+          out: artifacts/manifest-macos
       - store_artifacts:
-          path: release
+          path: dist-macos
           destination: macos
       - store_artifacts:
-          path: artifacts/manifest
+          path: artifacts/manifest-macos
           destination: macos-manifest
+      - persist_to_workspace:
+          root: dist-macos
+          paths:
+            - .
       - persist_to_workspace:
           root: .
           paths:
-            - release
             - artifacts
 
   build-android:
@@ -536,7 +544,7 @@ jobs:
           command: rm -f "$HOME/fluxa-release.keystore" android/keystore.properties
       - write_manifest:
           platform: android
-          out: artifacts/manifest
+          out: artifacts/manifest-android
       - fail_if_no_artifacts:
           pattern: 'android/app/build/outputs/apk/release/*.apk'
       - store_artifacts:
@@ -546,7 +554,7 @@ jobs:
           path: android/app/build/outputs/bundle/release
           destination: android-aab
       - store_artifacts:
-          path: artifacts/manifest
+          path: artifacts/manifest-android
           destination: android-manifest
       - persist_to_workspace:
           root: .
@@ -568,20 +576,28 @@ jobs:
     steps:
       - checkout
       - attach_workspace:
-          at: .
+          at: workspace
       - run:
           name: Collect artifacts and checksums
           command: |
             set -eu
-            mkdir -p publish
+            # Attached workspace lives in ./workspace; publish/ is created there so
+            # the artifact step below has a single tree to upload.
+            mkdir -p workspace/publish
+            cd workspace
             shopt -s nullglob
-            for f in release/*.AppImage release/*.deb release/*.exe release/*.dmg release/*.zip \
+            for f in dist-linux/*.AppImage dist-linux/*.deb \
+                     dist-windows/*.exe \
+                     dist-macos/*.dmg dist-macos/*.zip \
+                     artifacts/web/*.zip \
                      android/app/build/outputs/apk/release/*.apk \
                      android/app/build/outputs/bundle/release/*.aab; do
               [ -f "$f" ] && cp "$f" publish/
             done
+            for m in artifacts/manifest-*; do
+              [ -d "$m" ] && cp "$m/build-manifest.json" "publish/$(basename "$m").json" 2>/dev/null || true
+            done
             (cd publish && sha256sum * > SHA256SUMS)
-            cp artifacts/manifest/build-manifest.json publish/ 2>/dev/null || true
             ls -lh publish
       - run:
           name: Create GitHub release and attach artifacts
@@ -615,7 +631,7 @@ jobs:
             done
             echo "Draft release created with $(ls publish | wc -l) files. Review and publish manually on GitHub."
       - store_artifacts:
-          path: publish
+          path: workspace/publish
           destination: release
 
 workflows:

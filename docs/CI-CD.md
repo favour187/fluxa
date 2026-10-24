@@ -46,9 +46,9 @@ publish.
 | `security` | `cimg/node:20.20.2` | no critical advisories in shipped dependencies; no credential-shaped strings or signing files in the tree | `security-logs/*` |
 | `e2e-browser` | `mcr.microsoft.com/playwright:v1.64.1-noble` | the real two-client browser suite (pairing, negotiation, transfer, SHA-256, accept/decline/cancel, disconnect) | `e2e-results/` (JUnit + JSON + traces), `playwright-report/` |
 | `e2e-desktop` | Playwright image | Electron shell boots, preload bridge attached, mDNS discovery fires, 1 MB transfer hash matches | `desktop-e2e-results/` |
-| `build-web` | `cimg/node:20.20.2` | `Fluxa-<version>-web.zip` containing the static web build | `web/` |
-| `build-linux` | `cimg/node:20.20.2` | AppImage + deb are produced by electron-builder | `linux/`, `linux-manifest/` |
-| `build-windows` | Windows `machine` (`windows-server-2022-gui`) | NSIS installer + portable exe, and the version resource really is inside `Fluxa.exe` | `windows/`, `windows-manifest/` |
+| `build-web` | `cimg/node:20.20.2` | `Fluxa-<version>-web.zip` containing the static web build | `web/`, `manifest-web/` |
+| `build-linux` | `cimg/node:20.20.2` | AppImage + deb are produced by electron-builder into `dist-linux/` | `linux/`, `linux-manifest/` |
+| `build-windows` | Windows `machine` (`windows-server-2022-gui`) | NSIS installer + portable exe in `dist-windows/`, and the version resource really is inside `Fluxa.exe` | `windows/`, `windows-manifest/` |
 | `build-android` | `cimg/android:2026.10-node` | signed release APK + AAB with the correct `applicationId`, `versionCode`, label and launcher icon | `android-apk/`, `android-aab/`, `android-manifest/` |
 | `build-macos-unsigned` | `cimg/node:20.20.2` | a real macOS `.app`/`.zip` produced from Linux, with `CFBundleIdentifier`/version read back out of `Info.plist`; **unsigned and not notarisable from here** | `macos-unsigned/`, `macos-unsigned-manifest/` |
 | `build-macos` | macOS `machine` (`xcode:16.4.0`) | signed-capable `.dmg` + `.zip`; only runs when the pipeline is triggered with `macos_runner: true` | `macos/`, `macos-manifest/` |
@@ -151,7 +151,8 @@ read from there, so a version bump cannot drift between targets.
 
 `publish-github-release`:
 
-1. gathers `release/*` (Linux/Windows/macOS), `*.apk`, `*.aab` and the manifest;
+1. attaches the workspace and gathers `dist-linux/`, `dist-windows/`,
+   `dist-macos/`, the web zip, `*.apk`, `*.aab` and the per-platform manifests;
 2. writes `SHA256SUMS`;
 3. `POST /repos/favour187/fluxa/releases` with `draft: true`,
    `generate_release_notes: true`, `tag_name: $CIRCLE_TAG`;
