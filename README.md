@@ -158,12 +158,19 @@ the files.
 
 ## Continuous integration
 
+[![CircleCI](https://dl.circleci.com/status-badge/img/gh/favour187/fluxa/tree/main.svg?style=shield)](https://app.circleci.com/pipelines/github/favour187/fluxa)
+
+
 CircleCI runs `.circleci/config.yml`: `validate` (type-check, 60 unit tests,
 production build), `security` (production audit + secret scan), `e2e-browser`,
 `e2e-desktop`, and platform builds for web, Linux, Windows, Android and macOS.
 Tags `v*` add a manual approval before a draft GitHub release. Setup, required
 environment variables and the exact commands are in
 [docs/CI-CD.md](docs/CI-CD.md).
+
+Latest green run: `main` @ `70daec2` — all ten available jobs passed, including
+12/12 browser E2E, 4/4 desktop E2E, and Android signed with the release key
+imported from project environment variables.
 
 ## How a transfer actually works
 

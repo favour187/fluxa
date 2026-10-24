@@ -4,9 +4,27 @@ Fluxa is built and tested by CircleCI. The pipeline configuration lives in
 [`.circleci/config.yml`](../.circleci/config.yml) and uses no orbs: every job is
 written out so the exact commands are visible in review.
 
-> Verification status: the jobs and workflows below were executed on CircleCI
-> for commit `favour187/fluxa`. Where a job could not run (missing executor or
-> missing credential) the run says so explicitly — see "Known gaps" at the end.
+## Verified run
+
+The `main` workflow ran green for commit `70daec2`:
+
+**https://app.circleci.com/pipelines/github/favour187/fluxa**
+
+| Job | Result |
+| --- | --- |
+| `validate` | success — `tsc --noEmit`, 60/60 unit tests, production build |
+| `security` | success — production audit clean, secret scan clean |
+| `e2e-browser` | success — **12/12** Playwright tests, JUnit stored |
+| `e2e-desktop` | success — 4/4 Electron tests under Xvfb |
+| `build-web` | success — `Fluxa-0.2.0-web.zip` |
+| `build-linux` | success — AppImage + deb built on CircleCI |
+| `build-windows` | success — NSIS + portable.exe built on a **Windows machine executor** |
+| `build-android` | success — **signed** APK + AAB (keystore from project env vars), v1+v2 verified |
+| `build-macos-unsigned` | success — unsigned `Fluxa-0.2.0-mac-x64.zip` built on Linux |
+| `build-macos` (dmg) | not run — the plan rejects macOS executors (`resource-class-not-in-plan`); gated behind the `macos_runner` parameter |
+
+Everything above was executed by CircleCI, not locally. The jobs that could not
+run are called out rather than silently skipped.
 
 ## Workflows
 
@@ -32,7 +50,8 @@ publish.
 | `build-linux` | `cimg/node:20.20.2` | AppImage + deb are produced by electron-builder | `linux/`, `linux-manifest/` |
 | `build-windows` | Windows `machine` (`windows-server-2022-gui`) | NSIS installer + portable exe, and the version resource really is inside `Fluxa.exe` | `windows/`, `windows-manifest/` |
 | `build-android` | `cimg/android:2026.10-node` | signed release APK + AAB with the correct `applicationId`, `versionCode`, label and launcher icon | `android-apk/`, `android-aab/`, `android-manifest/` |
-| `build-macos` | macOS `machine` (`xcode:16.4.0`) | unsigned `.dmg` + `.zip` and correct `CFBundleIdentifier`/version | `macos/`, `macos-manifest/` |
+| `build-macos-unsigned` | `cimg/node:20.20.2` | a real macOS `.app`/`.zip` produced from Linux, with `CFBundleIdentifier`/version read back out of `Info.plist`; **unsigned and not notarisable from here** | `macos-unsigned/`, `macos-unsigned-manifest/` |
+| `build-macos` | macOS `machine` (`xcode:16.4.0`) | signed-capable `.dmg` + `.zip`; only runs when the pipeline is triggered with `macos_runner: true` | `macos/`, `macos-manifest/` |
 | `publish-github-release` | `cimg/node:20.20.2`, context `fluxa-release` | collects every artifact, writes `SHA256SUMS`, creates a draft GitHub release (only when a token is present) | `release/` |
 
 Each build job also runs `scripts/build-manifest.mjs`, which writes
@@ -40,10 +59,29 @@ Each build job also runs `scripts/build-manifest.mjs`, which writes
 versionCode, commit, per-file hashes and the *actual* signing state of each
 artifact.
 
+## Optional pipeline parameter
+
+```bash
+# run the real macOS job (needs a plan with macOS executors)
+curl -X POST -H "Circle-Token: $CIRCLE_TOKEN" -H "Content-Type: application/json" \
+  -d '{"branch":"main","parameters":{"macos_runner":true}}' \
+  https://circleci.com/api/v2/project/gh/favour187/fluxa/pipeline
+```
+
+`macos_runner` defaults to `false`, because the CircleCI plan attached to this
+project does not include macOS executors: the default branch stays green instead
+of reporting a failure that is a billing limitation, and the `build-macos`
+workflow simply does not appear.
+
 ## Required environment variables
 
 Configure these on the CircleCI project (**Project Settings → Environment
 Variables**) or, better, in a context. Never commit them.
+
+Already configured on this project (values masked by CircleCI):
+`FLUXA_ANDROID_KEYSTORE_B64`, `FLUXA_ANDROID_STORE_PASSWORD`,
+`FLUXA_ANDROID_KEY_ALIAS`, `FLUXA_ANDROID_KEY_PASSWORD`. That is why
+`build-android` produced a **signed** APK/AAB instead of an unsigned test one.
 
 | Variable | Needed by | Purpose |
 | --- | --- | --- |

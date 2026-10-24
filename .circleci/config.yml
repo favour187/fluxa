@@ -261,9 +261,12 @@ jobs:
             cp package.json LICENSE artifacts/web/
             (cd artifacts/web && zip -qr "../Fluxa-${version}-web.zip" .)
             ls -lh "artifacts/Fluxa-${version}-web.zip"
-      - write_manifest:
-          platform: web
-          out: artifacts/manifest
+      - run:
+          name: Generate build manifest
+          command: |
+            mkdir -p artifacts/manifest
+            node scripts/build-manifest.mjs --out artifacts/manifest --platform web \
+              --include "artifacts/Fluxa-$(node -p "require('./package.json').version")-web.zip"
       - fail_if_no_artifacts:
           pattern: artifacts/*.zip
       - store_artifacts:

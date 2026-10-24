@@ -282,8 +282,29 @@ aapt2 dump resources …apk | grep drawable/splash   # brand splash in every den
 * Both are **unsigned** (no Authenticode / Developer ID certificate exists here);
   the build manifest records that per file.
 
+### CI verification (CircleCI, commit `70daec2`)
+
+Executed by CircleCI on `main`, not on this machine:
+
+| Job | Result |
+| --- | --- |
+| validate | `tsc --noEmit` clean, **60/60** unit tests, production build |
+| security | production audit clean, secret scan clean, no key material tracked |
+| e2e-browser | **12/12** (JUnit: `tests=12 failures=0`), traces on failure |
+| e2e-desktop | 4/4 under Xvfb |
+| build-linux | AppImage 109 290 393 B, deb 76 131 526 B |
+| build-windows | setup 82 162 595 B, portable 81 870 369 B (native Windows runner) |
+| build-android | signed APK 3 761 733 B + AAB 3 554 911 B, v1+v2 verified in the log |
+| build-macos-unsigned | `Fluxa-0.2.0-mac-x64.zip` 100 808 889 B, unsigned |
+| build-web | `Fluxa-0.2.0-web.zip` |
+
+Hashes for each of those files are in the per-job `build-manifest.txt`
+artifacts.
+
 ### Not verified
 
 * No physical Android device, no Windows machine and no macOS machine ran these
   packages. The artifacts were built and inspected, not installed on hardware.
+  (Windows packages *were* built on Windows in CI; that is a build environment,
+  not a run of the app.)
 * macOS `.dmg` was not produced (requires macOS); only the `.zip` was.
