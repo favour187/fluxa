@@ -558,6 +558,11 @@ export class FluxaApp {
         },
         onControl: (msg) => {
           if (msg.t === 'chat') {
+            const active = box.entry?.session.verified && box.entry.session.state === 'connected';
+            if (!active) {
+              box.entry?.session.sendControl({ t: 'chatAck', id: msg.id, ok: false, reason: 'Device is not verified' });
+              return;
+            }
             if (!this.messages.some((item) => item.id === msg.id && item.deviceId === peer.deviceId)) this.messages = [...this.messages, { id: msg.id, deviceId: peer.deviceId, peerName: peer.name, direction: 'received', text: msg.text, sentAt: msg.sentAt, status: 'received' }].slice(-100);
             box.entry?.session.sendControl({ t: 'chatAck', id: msg.id, ok: true, receivedAt: Date.now() });
             this.emit();

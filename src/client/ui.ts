@@ -563,11 +563,29 @@ export class FluxaUI {
       const sendNow = el('button', 'btn btn-primary btn-sm', 'Send now'); sendNow.type = 'button';
       sendNow.addEventListener('click', () => this.sendStaged());
       actions.append(clear, sendNow); swipe.append(summary, actions);
-      let startX = 0, startY = 0;
-      swipe.addEventListener('pointerdown', (event) => { startX = event.clientX; startY = event.clientY; });
-      swipe.addEventListener('pointerup', (event) => {
-        if (event.clientX - startX > 90 && Math.abs(event.clientY - startY) < 70 && event.clientX >= window.innerWidth - 48) this.sendStaged();
+      let startX = 0, startY = 0, startRight = 0, dragging = false;
+      const resetSwipe = () => { dragging = false; swipe.style.transform = ''; swipe.classList.remove('is-dragging', 'edge-ready'); };
+      swipe.addEventListener('pointerdown', (event) => {
+        if (event.pointerType === 'mouse' && event.button !== 0) return;
+        startX = event.clientX; startY = event.clientY; startRight = swipe.getBoundingClientRect().right; dragging = true;
+        try { swipe.setPointerCapture(event.pointerId); } catch { /* capture can fail if the pointer is already cancelled */ }
       });
+      swipe.addEventListener('pointermove', (event) => {
+        if (!dragging) return;
+        const dx = Math.max(0, event.clientX - startX);
+        if (dx > 8 && Math.abs(event.clientY - startY) < 70) {
+          swipe.classList.add('is-dragging');
+          swipe.style.transform = `translateX(${Math.min(dx, Math.max(0, window.innerWidth - startRight))}px)`;
+          swipe.classList.toggle('edge-ready', event.clientX >= window.innerWidth - 48);
+        }
+      });
+      swipe.addEventListener('pointerup', (event) => {
+        const shouldSend = dragging && event.clientX - startX > 90 && Math.abs(event.clientY - startY) < 70 && event.clientX >= window.innerWidth - 48;
+        resetSwipe();
+        if (shouldSend) this.sendStaged();
+      });
+      swipe.addEventListener('pointercancel', resetSwipe);
+      swipe.addEventListener('lostpointercapture', resetSwipe);
       swipe.tabIndex = 0; swipe.setAttribute('role', 'group');
       swipe.setAttribute('aria-label', 'Swipe selected files to the right edge to send');
       swipe.dataset.testid = 'edge-send-card';
