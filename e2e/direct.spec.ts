@@ -189,6 +189,54 @@ test('pairs, verifies and transfers with no signalling server (direct code)', as
   await guest.context.close();
 });
 
+test('pairing the same two devices again replaces both old Direct sessions without losing trust', async () => {
+  test.setTimeout(180_000); // two full QR/ICE/SAS exchanges, not just one
+  const host = await openDevice('Direct Host');
+  const guest = await openDevice('Direct Guest');
+  try {
+    await expect(host.page.getByTestId('signal-status')).toHaveAttribute('data-state', 'offline');
+    await expect(guest.page.getByTestId('signal-status')).toHaveAttribute('data-state', 'offline');
+    for (let round = 0; round < 2; round++) {
+      await host.page.getByTestId('pair-button').click();
+      await expect(host.page.getByTestId('pairing-modal')).toBeVisible();
+      await expect(host.page.getByTestId('direct-start')).toBeVisible();
+      await host.page.getByTestId('direct-start').click();
+      const offerBox = host.page.getByTestId('direct-ticket');
+      await expect(offerBox).toHaveValue(/^FLX1/, { timeout: 30_000 });
+      const offer = await offerBox.inputValue();
+
+      await guest.page.getByTestId('pair-button').click();
+      await guest.page.getByTestId('direct-join-input').fill(offer);
+      await guest.page.getByTestId('direct-join-submit').click();
+      const replyBox = guest.page.getByTestId('direct-ticket');
+      await expect(replyBox).toHaveValue(/^FLX1/, { timeout: 30_000 });
+      const reply = await replyBox.inputValue();
+      await host.page.getByTestId('direct-reply-input').fill(reply);
+      await host.page.getByTestId('direct-complete').click();
+
+      const sasHost = (await host.page.getByTestId('sas-code').textContent({ timeout: 60_000 }))!.replace(/\s/g, '');
+      const sasGuest = (await guest.page.getByTestId('sas-code').textContent({ timeout: 60_000 }))!.replace(/\s/g, '');
+      expect(sasHost).toBe(sasGuest);
+      await host.page.getByTestId('verify-match').click();
+      await guest.page.getByTestId('verify-match').click();
+      for (const { page } of [host, guest]) {
+        await expect(page.getByTestId('device-item')).toHaveCount(1);
+        await expect(page.locator('.badge.verified')).toHaveCount(1);
+        const state = await page.evaluate(() => (window as unknown as {
+          __fluxa: { snapshot: () => {
+            direct: unknown; sessions: { state: string; verified: boolean }[];
+          } };
+        }).__fluxa.snapshot());
+        expect(state.direct, 'a finished QR ticket must not stay active after verification').toBeNull();
+        expect(state.sessions.filter((session) => session.state === 'connected' && session.verified)).toHaveLength(1);
+      }
+    }
+  } finally {
+    await host.context.close();
+    await guest.context.close();
+  }
+});
+
 test('the whole app fits a phone screen with no sideways scrolling', async () => {
   const context = await browser.newContext({ viewport: { width: 360, height: 640 } });
   const page = await context.newPage();
@@ -235,7 +283,9 @@ test('on a phone the dialog opens on the code that works, with cards at full wid
     .poll(async () =>
       page.evaluate(() => {
         const shell = document.querySelector('.app-shell')!.getBoundingClientRect().width;
-        const panels = [...document.querySelectorAll('.panel')].map((n) => n.getBoundingClientRect().width);
+        // A hidden Android Share inbox has no box; judge the visible cards.
+        const panels = [...document.querySelectorAll('.panel')].filter((n) => n.getClientRects().length > 0)
+          .map((n) => n.getBoundingClientRect().width);
         return panels.length > 0 && panels.every((w) => w > shell * 0.85);
       }),
     )

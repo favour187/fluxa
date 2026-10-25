@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Different app id, signing key and data store: make the test-only icon
+         distinguishable from an installed release in the launcher/share sheet. -->
+    <string name="app_name">Fluxa Test</string>
+    <string name="title_activity_main">Fluxa Test</string>
+</resources>

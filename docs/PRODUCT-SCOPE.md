@@ -4,7 +4,7 @@ This document preserves the product requirements for Fluxa. It is the target sco
 
 ## Core experience
 
-- **Edge gesture and ripple:** users can select content and use a clear edge-directed touch gesture to send it to a chosen nearby device. Both endpoints should show a coordinated ripple, with motion that respects reduced-motion settings. Keep standard file-picker and drag-and-drop fallbacks.
+- **Edge gesture and ripple:** inside Fluxa, users can select content and swipe a staged card toward an edge or tap Send. Across other Android apps, a normal app cannot universally intercept their edge swipes or enumerate their browser tabs: the explicit, extension-free route is **Share → Fluxa**, with local queue, destination review and receiver consent. Keep standard file-picker and drag-and-drop fallbacks.
 - **Six-character pairing:** easy manual entry, QR pairing where practical, expiry and replay protection, and a short code that resolves connection setup rather than truncating the underlying connection data. Keep the six-digit out-of-band security verification.
 - **Local-first transfer:** prioritize a direct WebRTC path on the same Wi-Fi or phone hotspot when the network permits it. Do not promise offline direct connectivity on networks that block peer traffic; clearly explain when signalling or a relay is required.
 - **Real messaging:** bidirectional text messages between verified connected devices, with timestamps and clear sending/delivery/error states. Messages must use the authenticated peer channel, not a pretend local-only chat UI.
@@ -28,10 +28,10 @@ This document preserves the product requirements for Fluxa. It is the target sco
 
 ## Verification checklist
 
-- [x] PR #4's merged feature tree passed 93 Node/unit/extension-link, 33 Chromium E2E and six Linux Electron E2E locally; its branch pipeline 39 passed six jobs, and main pipeline 40 passed nine. The optional-camera follow-up subsequently passed 94 unit tests and strict TypeScript; its own CI remains a separate gate.
+- [x] PR #4's merged tree passed 93 Node/unit/extension-link, 33 Chromium E2E and six Linux Electron E2E locally; branch pipeline 39 and main pipeline 40 passed. Optional-camera PR #5 merged as `e5940ed`, with final-main pipeline 42 passing all nine jobs and independently verified signed Android artifacts. A real two-phone Direct QR connection then failed after SAS; this separate Android follow-up has locally passed 102 Node tests, 35 Chromium E2E, native JVM and Android builds, but requires its own CI and physical retest.
 - [x] Two independent Chromium contexts pair, verify, exchange messages and transfer files; browser E2E also exercised clipboard, screen/video, handoff draft, QR and rules.
 - [ ] Same-LAN/hotspot path and phone-to-phone offline route are tested on real devices; no-internet claims remain limited to tested ICE conditions.
 - [ ] Edge swipe and CSS transfer ripple have automated browser coverage, but real touch/hardware timing and screen-reader usability need validation. Send now is the explicit button/keyboard fallback.
-- [ ] Browser OS Share Target/inbound share and platform-specific share-out have not all been validated; native Capacitor Share is wired but hardware checks are pending.
+- [ ] Android native `ACTION_SEND`/`ACTION_SEND_MULTIPLE` inbound share is implemented and locally debug-built; its mock-plugin WebRTC E2E passes, but physical share-sheet and phone-to-phone delivery remain untested. Browser/PWA Web Share Target and iOS inbound share are separate features, not silently implemented by Android.
 - [x] Folder paths, cancellation, integrity failures, retry/recovery and partial rehash were exercised by automated tests.
 - [x] Android, iOS, Windows, macOS and Linux source/build/runtime evidence is recorded separately, including **not built** where appropriate.

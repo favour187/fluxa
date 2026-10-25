@@ -46,6 +46,8 @@ import { nativeAvailability, saveFileNative } from './native.js';
 import { ShareManager, type ReceivedShare } from './share.js';
 import { ClipboardSync, clipboardPort, type ClipboardView } from './clipboard-sync.js';
 import { ScreenShare, type ScreenView } from './screen-share.js';
+import { androidSharePlugin, AndroidInboxFile, classifyAndroidText, validAndroidShare,
+  type AndroidSharedItem, type AndroidSharePlugin } from './android-share.js';
 import type { SharedContent } from '../shared/protocol.js';
 
 export interface SessionView {
@@ -68,6 +70,12 @@ export interface PairingView {
 }
 
 export interface HandoffDraft { url: string; title: string }
+
+export interface AndroidInboxView extends AndroidSharedItem {
+  sending: boolean;
+  delivered: boolean;
+  error: string | null;
+}
 
 export interface TransferView {
   id: string;
@@ -119,6 +127,8 @@ export interface AppSnapshot {
   screen: (ScreenView & { peerDeviceId: string }) | null;
   /** A browser/extension link waiting for the user to review and choose a peer. */
   handoffDraft: HandoffDraft | null;
+  /** Explicit Android Share intents, staged locally until receiver confirms. */
+  androidInbox: AndroidInboxView[];
   messages: ChatEntry[];
 }
 
@@ -128,6 +138,8 @@ export interface DirectView {
   /** The ticket this device wants the other device to read (null while working). */
   ticket: string | null;
   error: string | null;
+  /** Only the pairing currently shown, never an unrelated already-live peer. */
+  sessionState?: PeerState | null;
 }
 
 interface SessionEntry {
@@ -221,6 +233,13 @@ export class FluxaApp {
   private native = false;
   /** Where received files were written on this device, by transfer id. */
   private savedLocations = new Map<string, string>();
+  private androidShare: AndroidSharePlugin | null = null;
+  private androidInbox: AndroidSharedItem[] = [];
+  private androidSending = new Set<string>();
+  private androidDelivered = new Set<string>();
+  private androidErrors = new Map<string, string>();
+  private androidTransfers = new Map<string, string>();
+  private androidShares = new Map<string, string>();
 
   async init(): Promise<void> {
     this.identity = await loadIdentity();
@@ -265,6 +284,7 @@ export class FluxaApp {
     this.signal.connect();
     this.native = (await nativeAvailability()).available;
     await this.initDesktop();
+    if (this.native) await this.initAndroidInbox();
     this.ready = true;
     this.emit();
   }
@@ -286,6 +306,107 @@ export class FluxaApp {
       bridge.onHandoff((draft) => this.prepareHandoff(draft.url, draft.title));
     } catch (err) {
       this.toast('error', `Desktop integration unavailable: ${(err as Error).message}`);
+    }
+  }
+
+  private async initAndroidInbox(): Promise<void> {
+    const plugin = androidSharePlugin();
+    if (!plugin) return;
+    this.androidShare = plugin;
+    try {
+      // Registration first, then list: an import finishing during boot cannot
+      // slip between the initial snapshot and the native event listener.
+      await plugin.addListener('shareReceived', () => void this.refreshAndroidInbox());
+      await this.refreshAndroidInbox();
+    } catch (error) {
+      this.toast('error', `Android Share target unavailable: ${(error as Error).message}`);
+      this.androidShare = null;
+    }
+  }
+
+  private async refreshAndroidInbox(): Promise<void> {
+    if (!this.androidShare) return;
+    try {
+      const { items, error } = await this.androidShare.list();
+      this.androidInbox = items.filter(validAndroidShare).sort((a, b) => a.createdAt - b.createdAt);
+      if (error) this.toast('error', `Android share was not staged: ${error}`);
+      this.emit();
+    } catch (error) {
+      this.toast('error', `Could not load Android shares: ${(error as Error).message}`);
+    }
+  }
+
+  /** An item stays on this phone until its receiver confirms delivery. */
+  async deliverAndroidShare(itemId: string, deviceId: string): Promise<void> {
+    const item = this.androidInbox.find((entry) => entry.id === itemId);
+    const peer = this.sessions.get(deviceId);
+    if (!item || !this.androidShare || this.androidSending.has(itemId) || this.androidDelivered.has(itemId)) return;
+    if (!peer?.session.verified || peer.session.state !== 'connected') {
+      this.toast('error', 'Open Fluxa on both devices and verify a live connection first. This item stays on your phone.');
+      return;
+    }
+    this.androidErrors.delete(itemId);
+    try {
+      if (item.files.length) {
+        if (!peer.manager) throw new Error('File transfer is not ready');
+        this.androidSending.add(itemId);
+        this.emit();
+        const files = item.files.map((file) => new AndroidInboxFile(this.androidShare!, item.id, file));
+        const task = peer.manager.send(files);
+        this.androidTransfers.set(task.id, itemId);
+        this.toast('info', 'Sending staged files. Keep Fluxa open until the receiver confirms them.');
+      } else {
+        if (!peer.shares) throw new Error('Content sharing is not ready');
+        const content = classifyAndroidText(item.text, item.title);
+        this.androidSending.add(itemId);
+        this.emit();
+        const shareId = peer.shares.send(content.kind, content.text, content.url, content.title);
+        this.androidShares.set(shareId, itemId);
+        this.toast('info', 'Waiting for the other device to approve the shared text or link');
+      }
+    } catch (error) {
+      this.androidSending.delete(itemId);
+      this.androidErrors.set(itemId, (error as Error).message);
+      this.toast('error', `Share not sent: ${(error as Error).message}`);
+      this.emit();
+    }
+  }
+
+  async discardAndroidShare(itemId: string): Promise<void> {
+    if (!this.androidShare || this.androidSending.has(itemId)) return;
+    if (!this.androidInbox.some((entry) => entry.id === itemId)) return;
+    this.androidSending.add(itemId);
+    this.emit();
+    await this.removeAndroidShare(itemId, false);
+  }
+
+  private async removeAndroidShare(itemId: string, delivered: boolean): Promise<void> {
+    try {
+      if (!this.androidShare) throw new Error('Android Share plugin is unavailable');
+      await this.androidShare.discard({ id: itemId });
+      this.androidInbox = this.androidInbox.filter((entry) => entry.id !== itemId);
+      this.androidErrors.delete(itemId);
+      this.androidDelivered.delete(itemId);
+    } catch (error) {
+      if (delivered) this.androidDelivered.add(itemId);
+      const message = delivered ? 'Delivered, but could not clear the local copy' : 'Could not discard the local share';
+      this.androidErrors.set(itemId, `${message}: ${(error as Error).message}`);
+      this.toast('error', `${message}: ${(error as Error).message}`);
+    } finally {
+      this.androidSending.delete(itemId);
+      this.emit();
+    }
+  }
+
+  private onAndroidShareResult(id: string, ok: boolean, reason?: string): void {
+    const itemId = this.androidShares.get(id);
+    if (!itemId) return;
+    this.androidShares.delete(id);
+    if (ok) void this.removeAndroidShare(itemId, true);
+    else {
+      this.androidSending.delete(itemId);
+      this.androidErrors.set(itemId, reason ?? 'The recipient did not approve this item');
+      this.emit();
     }
   }
 
@@ -414,12 +535,16 @@ export class FluxaApp {
       desktop: this.desktopInfo,
       nearby: this.nearby,
       signalUrl: this.signal?.currentUrl ?? null,
-      direct: this.direct,
+      direct: this.direct ? { ...this.direct, sessionState: this.directSession?.state ?? null } : null,
       incomingShares: [...this.pendingShares.values()],
       receivedShares: [...this.receivedShares],
       clipboard: this.clipboard && this.clipboardPeerId ? { peerDeviceId: this.clipboardPeerId, ...this.clipboard.view } : null,
       screen: this.screen && this.screenPeerId ? { peerDeviceId: this.screenPeerId, ...this.screen.view } : null,
       handoffDraft: this.handoffDraft,
+      androidInbox: this.androidInbox.map((item) => ({ ...item,
+        sending: this.androidSending.has(item.id), delivered: this.androidDelivered.has(item.id),
+        error: this.androidErrors.get(item.id) ?? null,
+      })),
       messages: [...this.messages].slice(-100),
     };
   }
@@ -609,11 +734,12 @@ export class FluxaApp {
       events: {
         onState: (state, detail) => {
           const entry = box.entry;
-          if (entry?.error && state !== 'failed') entry.error = null;
-          if (state === 'failed' && detail) {
-            if (entry) entry.error = detail;
-            this.toast('error', `Connection to ${peer.name}: ${detail}`);
-          }
+          if (entry && (state === 'failed' || state === 'closed')) {
+            entry.error = detail ?? 'The connection ended without a reason';
+            if (detail && detail !== 'replaced by a new pairing' && detail !== 'pairing cancelled') {
+              this.toast(state === 'failed' ? 'error' : 'info', `Connection to ${peer.name}: ${detail}`);
+            }
+          } else if (entry && state === 'connecting') entry.error = null;
           if (state === 'awaiting-verification') {
             this.toast('info', `Compare the code shown on ${peer.name}`);
           }
@@ -685,11 +811,17 @@ export class FluxaApp {
         onVerified: () => {
           const entry = box.entry;
           if (entry) void this.refreshConnectionPath(entry);
+          // The UI normally finishes Direct at handshake time. If another
+          // modal hid it, never leave a verified connection bound to a stale
+          // ticket that a later Cancel/new pairing could close by mistake.
+          if (this.directSession === session) this.finishDirectPairing();
           void this.rememberPeer(peer);
           this.toast('success', `Verified connection with ${peer.name}`);
           this.emit();
         },
-        onClosed: (reason) => this.onSessionClosed(peer.deviceId, reason),
+        onClosed: (reason) => {
+          if (box.entry) this.onSessionClosed(box.entry, reason);
+        },
       },
     });
 
@@ -729,7 +861,10 @@ export class FluxaApp {
         void this.desktop?.notify(`Shared by ${item.peerName}`, `Approve ${item.kind} on this device`);
         this.emit();
       },
-      onResult: (_id, ok, reason) => this.toast(ok ? 'success' : 'error', ok ? 'The other device approved the shared item' : reason ?? 'Item declined'),
+      onResult: (id, ok, reason) => {
+        this.onAndroidShareResult(id, ok, reason);
+        this.toast(ok ? 'success' : 'error', ok ? 'The other device approved the shared item' : reason ?? 'Item declined');
+      },
       onExpired: (id) => {
         this.pendingShares.delete(id);
         this.emit();
@@ -767,9 +902,11 @@ export class FluxaApp {
     this.emit();
   }
 
-  private onSessionClosed(deviceId: string, reason: string): void {
-    const entry = this.sessions.get(deviceId);
-    if (!entry) return;
+  private onSessionClosed(entry: SessionEntry, reason: string): void {
+    // Async events from an old connection must not stop the replacement's
+    // transfers, clipboard, or approval queue under the same device id.
+    if (![...this.sessions.values()].includes(entry)) return;
+    const deviceId = entry.link.deviceId;
     for (const item of this.messages) {
       if (item.deviceId !== deviceId || item.direction !== 'sent' || item.status !== 'sending') continue;
       clearTimeout(this.chatTimers.get(item.id));
@@ -795,8 +932,10 @@ export class FluxaApp {
     for (const [id, item] of this.pendingShares) {
       if (item.peerDeviceId === deviceId) this.pendingShares.delete(id);
     }
-    if (!this.userClosed.has(deviceId) && reason !== 'replaced by a new pairing') {
-      this.toast('info', `${entry.link.name} disconnected`);
+    // onState already retains and toasts the first, actionable reason. Do not
+    // replace it with a second generic "disconnected" message on teardown.
+    if (!this.userClosed.has(deviceId) && !entry.error && reason !== 'replaced by a new pairing') {
+      this.toast('info', `${entry.link.name} disconnected: ${reason}`);
     }
     this.emit();
   }
@@ -870,6 +1009,16 @@ export class FluxaApp {
   }
 
   private onTransferFinished(task: SendTask | ReceiveTask, files: ReceivedFile[]): void {
+    const androidItemId = task.role === 'send' ? this.androidTransfers.get(task.id) : undefined;
+    if (androidItemId) {
+      this.androidTransfers.delete(task.id);
+      if (task.state === 'complete') void this.removeAndroidShare(androidItemId, true);
+      else {
+        this.androidSending.delete(androidItemId);
+        this.androidErrors.set(androidItemId,
+          task.error ?? 'File transfer was interrupted. The staged files remain on this phone; reconnect and retry.');
+      }
+    }
     if (files.length > 0) this.received.set(task.id, files);
     this.transfers.set(task.id, this.toTransferView(task));
     const entry: HistoryEntry = {
@@ -1013,8 +1162,10 @@ export class FluxaApp {
     this.emit();
 
     try {
-      await entry.session.start();
+      await entry.session.start({ manualTicket: true });
+      if (this.directSession !== entry.session) return; // cancelled during offer creation
       await waitForIceGathering(entry.session.pc);
+      if (this.directSession !== entry.session) return;
       const ticket = await encodeTicket({
         v: 1,
         protocolVersion: PROTOCOL_VERSION,
@@ -1024,8 +1175,10 @@ export class FluxaApp {
         identity: this.selfTicketIdentity(),
         candidates: ticketCandidates(relay),
       });
+      if (this.directSession !== entry.session) return;
       this.direct = { role: 'host', step: 'offer', ticket, error: null };
     } catch (err) {
+      if (this.directSession !== entry.session) return;
       this.direct = { role: 'host', step: 'offer', ticket: null, error: (err as Error).message };
       this.toast('error', `Could not create a pairing code: ${(err as Error).message}`);
     }
@@ -1068,15 +1221,20 @@ export class FluxaApp {
     // transfers all look sessions up by device id.
     this.directKey = ticket.identity.deviceId;
     this.directNonce = ticket.nonce;
+    const previous = this.sessions.get(ticket.identity.deviceId);
+    if (previous) previous.session.close('replaced by a new pairing');
     this.sessions.set(ticket.identity.deviceId, entry);
     this.emit();
 
     try {
       await entry.session.handleRelay('offer', { sdp: ticket.sdp });
+      if (this.directSession !== entry.session) return false;
       for (const candidate of ticket.candidates) {
         await entry.session.handleRelay('ice', { candidate });
+        if (this.directSession !== entry.session) return false;
       }
       await waitForIceGathering(entry.session.pc);
+      if (this.directSession !== entry.session) return false;
       const reply = await encodeTicket({
         v: 1,
         protocolVersion: PROTOCOL_VERSION,
@@ -1086,10 +1244,12 @@ export class FluxaApp {
         identity: this.selfTicketIdentity(),
         candidates: ticketCandidates(relay),
       });
+      if (this.directSession !== entry.session) return false;
       this.direct = { role: 'guest', step: 'reply', ticket: reply, error: null };
       this.emit();
       return true;
     } catch (err) {
+      if (this.directSession !== entry.session) return false;
       this.direct = { role: 'guest', step: 'reply', ticket: null, error: (err as Error).message };
       this.toast('error', `Could not answer that pairing code: ${(err as Error).message}`);
       this.emit();
@@ -1112,6 +1272,7 @@ export class FluxaApp {
       this.toast('error', 'That is an invitation code; paste the reply code from the other device');
       return false;
     }
+    if (this.directSession !== session || this.direct?.role !== 'host') return false;
     if (this.directNonce && ticket.nonce !== this.directNonce) {
       this.toast('error', 'That reply belongs to a different pairing — start again');
       return false;
@@ -1127,23 +1288,22 @@ export class FluxaApp {
       });
       this.rekeyDirectSession(ticket.identity.deviceId);
       await session.handleRelay('answer', { sdp: ticket.sdp });
+      if (this.directSession !== session) return ['awaiting-verification', 'connected'].includes(session.state);
       for (const candidate of ticket.candidates) {
         await session.handleRelay('ice', { candidate });
+        if (this.directSession !== session) return ['awaiting-verification', 'connected'].includes(session.state);
       }
+      // A fast peer can reach SAS while await addIceCandidate is pending. The
+      // UI then finishes this pairing and clears the ticket. Never resurrect a
+      // stale "connecting" ticket after the verified session has taken over.
+      if (this.directSession !== session) return ['awaiting-verification', 'connected'].includes(session.state);
       this.direct = { role: 'host', step: 'connecting', ticket: null, error: null };
       this.emit();
-      void this.rememberPeer({
-        connId: this.directKey ?? '',
-        deviceId: ticket.identity.deviceId,
-        publicKey: ticket.identity.publicKey,
-        fingerprint: ticket.identity.fingerprint,
-        name: ticket.identity.name,
-        platform: ticket.identity.platform,
-        sessionNonce: this.directNonce ?? '',
-        confirmed: true,
-      });
+      // Do not persist trust just because a QR reply was scanned. Only the
+      // onVerified callback after this device's explicit SAS approval may do so.
       return true;
     } catch (err) {
+      if (this.directSession !== session) return false;
       this.direct = { role: 'host', step: 'offer', ticket: this.direct.ticket, error: (err as Error).message };
       this.toast('error', `Could not connect: ${(err as Error).message}`);
       this.emit();
@@ -1160,6 +1320,10 @@ export class FluxaApp {
     this.direct = null;
     this.directSession = null;
     this.directRelay = null;
+    // This ticket is no longer an in-progress pairing. A future Cancel/Start
+    // must never delete the already established session from the device list.
+    this.directKey = null;
+    this.directNonce = null;
     this.emit();
   }
 
@@ -1181,6 +1345,8 @@ export class FluxaApp {
     const key = this.directKey;
     if (!key || !this.sessions.has(key) || key === deviceId) return;
     const entry = this.sessions.get(key)!;
+    const previous = this.sessions.get(deviceId);
+    if (previous && previous !== entry) previous.session.close('replaced by a new pairing');
     this.sessions.delete(key);
     this.sessions.set(deviceId, entry);
     this.directKey = deviceId;

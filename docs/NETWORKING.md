@@ -13,7 +13,7 @@ not trust signals.
 | Path | Needed | Verified in this repository |
 | --- | --- | --- |
 | Same browser host / compatible private LAN | Fluxa Node or desktop broker; reachable UDP host candidates | Two Chromium contexts and two Linux Electron instances passed transfer E2E locally. LAN hardware/firewall not tested. |
-| Direct offer/reply code | No signalling server; viable WebRTC ICE path | Chromium E2E passed with server disconnected. Still needs real network connectivity. |
+| Direct offer/reply code | No signalling server; viable WebRTC ICE path | Chromium E2E passed with server disconnected, but a user's two foregrounded Android phones disconnected after SAS using the final `e5940ed` APK. The follow-up source preserves the first disconnect/ICE reason and fixes the manual QR timeout; the original physical failure is not yet verified resolved. |
 | NAT traversal (srflx) | Reachable STUN service in `FLUXA_ICE_SERVERS` | Configuration and ICE path reporting are implemented; no multi-NAT device test. |
 | Remote relay | Public `wss://` Fluxa server **and** reachable coturn with TLS/UDP/TCP, operator access key, bandwidth quotas | REST credential issuance tested with real WebSockets. No external TURN server or two-network hardware test was run here. |
 

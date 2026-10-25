@@ -1,6 +1,6 @@
 # Build and release guide — Fluxa 0.2.0 / transfer protocol 2
 
-This guide describes reproducible builds. PR #4 merged as `393fa38`; its main pipeline 40 passed nine jobs and built release-signed Android APK/AAB plus unsigned desktop packages. **An independent APK badging check then found an implicitly required camera feature** that would exclude devices using manual pairing. This follow-up declares camera hardware optional and makes the compiled-APK CI check mandatory. Do not treat pipeline-40 binaries as packages containing that fix; check the follow-up commit's own pipeline, hashes and signing results. No physical device, iOS Xcode/IPA, browser-store release or production TURN was validated. Run
+This guide describes reproducible builds. PR #4 (`393fa38`) and the optional-camera PR #5 (`e5940ed`) are merged; final-main [pipeline 42](https://app.circleci.com/pipelines/github/favour187/fluxa/42) passed all nine jobs and produced independently verified **release-signed** Android APK/AAB. **A two-phone test of that signed build still failed immediately after Direct QR SAS approval.** The working Android stability / native Share source is separate and is not a signed release; its local unsigned release build cannot replace the earlier signed APK. Retest on both phones before release, then inspect this follow-up commit's own CI, hashes and signing results. No iOS Xcode/IPA, browser-store release or production TURN was validated. Run
 `node scripts/sync-version.mjs --check` before every package build. Updates from
 protocol v1 must update both peers and the signalling broker together; old
 direct tickets and incomplete v1 journals cannot be reinterpreted as verified
@@ -72,15 +72,16 @@ The lower heap/one-worker override is for a **2 GiB Linux test sandbox** and
 does not skip lint or release checks. On a normal machine the project defaults
 usually suffice. Release outputs are under `android/app/build/outputs/`.
 Without locally provisioned release credentials, `assembleRelease` writes an
-**unsigned** APK/AAB: `apksigner verify` fails for such a release APK and these
-are **not installable/distributable release packages**. The merged feature tree
-was built in CircleCI (pipeline 40, job 331) with the real release signing key;
-no Android SDK APK was built *locally* in this workspace. Its compiled APK
-revealed an implied required camera; this follow-up must be built and checked
-before using an updated package. The Gradle debug keystore
-signs the `assembleDebug` APK, installable for **testing only** (not a Play upload
-certificate). This workspace did **not** install an APK on a device or run a
-mobile WebRTC scenario.
+**unsigned** APK/AAB: `apksigner verify` fails for the release APK and
+`jarsigner -verify` reports the AAB unsigned. These are **not installable/
+distributable release packages**. The corrected final-main `e5940ed` APK/AAB
+were built with the release key on CI pipeline 42, then independently verified;
+the new Android Share / Direct follow-up has since passed local Android JVM,
+debug build, release build and vital lint, but **not CI release signing or a
+physical two-phone retest**. The Gradle debug keystore signs `assembleDebug`
+under the **separate `com.fluxa.transfer.debug` package**, installable alongside
+the old release for **testing only** (not a Play upload certificate). This
+workspace cannot install it on the user's phones.
 
 **A real CI release key already exists.** Public CircleCI Android job
 [173](https://app.circleci.com/pipelines/github/favour187/fluxa/17/workflows)
@@ -89,15 +90,18 @@ manifest records both as signed; independently downloaded APK hash
 `aa6a74c87e586cce85e488ce5643096cc31128e885046368c18d8919b9a32520`
 matched the manifest, and `apksigner verify --verbose --print-certs` verified
 v1 and v2 signatures from `CN=Fluxa, OU=Fluxa Releases`. Pipeline 40's newer
-`393fa38` APK/AAB were also independently SHA-256 and signature verified, but
-packaged a required camera feature. Once the optional-camera follow-up is
-merged, inspect **its** manifest and verify both APK and AAB signatures and compiled feature flags independently.
-For example, `aapt2 dump badging Fluxa-0.2.0-release.apk` should list both
+`393fa38` APK/AAB were also independently verified but packaged a required
+camera feature. PR #5 corrected it; the final-main `e5940ed` pipeline-42
+release APK/AAB were independently checked for release signatures, hashes,
+correct commit and optional compiled camera features. **Neither signed build
+contains the Android Share / Direct follow-up**, and the later final-main build
+failed the user's two-phone Direct pairing test. For the next pushed commit,
+verify its own CI and artifacts; `aapt2 dump badging` must list both
 `android.hardware.camera` and `android.hardware.camera.any` under
-`uses-feature-not-required`, and **must not** list an implied required camera.
-`apksigner verify --verbose --print-certs` verifies the APK signing schemes;
-`jarsigner -verify` verifies the AAB JAR signature. The signed pipeline-40
-artifact had matching hashes and signatures but **failed** the camera check.
+`uses-feature-not-required` and no implied required camera. `apksigner verify
+--verbose --print-certs` checks the APK signing schemes; `jarsigner -verify`
+checks the AAB JAR signature. Signing and feature inspection alone cannot
+establish physical-device compatibility.
 
 Keep the existing key **outside the repository**, in CI project secrets
 `FLUXA_ANDROID_KEYSTORE_B64`, `FLUXA_ANDROID_STORE_PASSWORD`,

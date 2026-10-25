@@ -551,7 +551,7 @@ jobs:
           command: |
             set -o pipefail
             cd android
-            ./gradlew --no-daemon --max-workers=2 assembleRelease bundleRelease 2>&1 | tee ../android-build.log
+            ./gradlew --no-daemon --max-workers=2 :app:testDebugUnitTest assembleRelease bundleRelease 2>&1 | tee ../android-build.log
       - save_cache:
           key: v2-gradle-{{ checksum "android/version.properties" }}
           paths:
@@ -578,6 +578,12 @@ jobs:
             if printf '%s\n' "$BADGING" | grep -F "uses-implied-feature: name='android.hardware.camera'"; then
               echo 'Android camera is unexpectedly required'; exit 1
             fi
+            # The actual APK (not just source XML) must expose Android's
+            # explicit Share target and contain the installed native plugin.
+            MANIFEST="$("$BT/aapt2" dump xmltree --file AndroidManifest.xml "$APK")"
+            printf '%s\n' "$MANIFEST" | grep -F '"android.intent.action.SEND"'
+            printf '%s\n' "$MANIFEST" | grep -F '"android.intent.action.SEND_MULTIPLE"'
+            unzip -p "$APK" 'classes*.dex' | strings | grep -F 'FluxaIncomingSharePlugin'
             if [ -n "${FLUXA_ANDROID_KEYSTORE_B64:-}" ]; then
               "$BT/apksigner" verify --verbose --print-certs "$APK" | grep -E "Verified using|Signer #1 certificate DN"
             else

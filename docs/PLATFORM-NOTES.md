@@ -26,3 +26,74 @@ Transfer automation is per verified device and defaults to Ask. Optional auto-ac
 The tab-handoff extension provides a reviewed URL/title, not third-party cookies or sign-in continuity. The destination must sign in to web services independently. The registered desktop `fluxa://handoff` receiver only prepares a local draft; normal OS association/browser prompts are not guaranteed on an unpacked build.
 
 **Transferring** APK/MSI/DMG/deb files is ordinary file transfer: Fluxa does not install apps, bypass OS permissions or validate third-party publisher signatures. Same-network and remote transfers still depend on viable WebRTC ICE and, when needed, user-deployed WSS/TURN; no universal offline route is claimed.
+
+## Android Direct QR / Share Target follow-up (2026-10-25)
+
+**Why this exists:** Two actual Android phones using the final signed `e5940ed` APK
+exchanged the offer/reply QRs, reached the six-digit SAS, and then immediately
+disconnected **while both apps were foregrounded**. A browser test did not
+reproduce it. The old signed APK is not a remedy. We do not know the first
+WebRTC/ICE error from those phones, so do not claim this follow-up definitively
+fixes that physical-device failure.
+
+**Source changes on the follow-up branch:** The Direct host previously started
+its 25-second data-channel deadline when it *displayed the invitation*, before
+any human could scan the two QRs; it now starts after the host applies the
+reply. Peer teardown latches the first reason, so an Android WebView's secondary
+`onclose` cannot replace `connection failed` with a reasonless `Disconnected`.
+The selected device card now retains the reason (with ICE/transport state),
+provides **Pair again**, and labels serverless status as **No pairing server**
+(or **Direct connected**) instead of falsely implying the phone has no network.
+An asynchronous handshake cannot resurrect a closed connection or republish a
+stale Direct ticket *after* the verification dialog has taken over. A repeated
+Direct pairing replaces the previous live session rather than being cancelled
+by an unrelated connected peer; this precise sequence now has browser E2E
+coverage. Trust is not saved merely for scanning a direct reply before SAS
+approval. All new sessions still require explicit SAS comparison.
+
+The installed Android app now registers `ACTION_SEND`/`ACTION_SEND_MULTIPLE`
+for **Share → Fluxa**, in addition to its existing pairing deep link. The
+native plugin copies only explicitly shared text and granted `content://` files
+into app-private storage with 64 KiB I/O, bounded item/size limits, and no
+clipboard polling, overlay or Accessibility Service. Mixed file+text shares
+create separate inbox cards so each can be acknowledged independently. On
+restart the inbox can be reviewed again; nothing is remotely delivered until
+**a live verified peer is selected and Send is tapped**. Text/links require the
+recipient's approval (then explicit copy/open); files are removed from the
+local inbox only after the receiver's verified completion acknowledgement.
+Android links may contain sensitive query tokens; inspect the full link before
+sending. The staging area is app-private, not end-to-end encrypted at rest;
+Android storage protection and `allowBackup=false` apply. Share target limits:
+32 files per action, 512 MiB per file, 1 GiB total local inbox, 20 queued
+items and 16 KiB of text. Android `ACTION_SEND` content URIs need the sharing
+app's read grant. Unsupported app content or oversized input fails visibly;
+ordinary in-app pickers remain the fallback for larger sources.
+
+**Limits that remain:** Android cannot universally intercept swipes along the
+screen edge in Chrome/other apps, enumerate browser tabs, or read the clipboard
+in the background as a normal app. Other apps must expose Share; no browser
+extension is needed for the Android Share path. This is **not** a foreground
+service, native background WebRTC engine, background receiver, auto-reconnect,
+or cross-app drag target. A Direct QR ticket requires a viable local ICE path
+(both phones typically on the same Wi-Fi without guest/client isolation).
+Phone/laptop delivery works while the destination Fluxa instance is connected;
+a desktop app may provide a separate pairing broker, but these Direct QRs use
+no broker. Leave Fluxa open until the other device confirms receipt. If the
+physical Android disconnect recurs, the retained **Reason** on BOTH devices
+would be useful; a redacted `adb logcat` around the failure could help if
+available. Without those observations the physical root cause may remain
+unknown. Do not send QR tickets (they can reveal local network addresses), file
+contents or signing credentials in logs.
+
+**Evidence for this branch (not a release):** strict TypeScript, 102 Node/unit/
+extension tests, **35/35** Chromium E2E (including serverless Direct WebRTC,
+re-pairing after verification and a *simulated* Android plugin-boundary test
+exercising review, approval and streamed receipt). Local SDK/JDK 17 `:app:testDebugUnitTest`, `:app:assembleDebug`,
+`assembleRelease`, `bundleRelease` and Android release vital lint passed. Compiled
+APK manifest/DEX contain Share actions/plugin, with camera hardware optional.
+The debug APK is signed with Android's *debug* certificate, not the release key;
+it uses a separate `.debug` package/data store. The local release APK/AAB are
+**unsigned**. No two-physical-phone retest of this source, new CI-signed release
+APK/AAB, iOS build or guarantee of background phone operation. CI adds native
+JUnit and compiled manifest/DEX share-target gates for a future pushed
+revision; their success is not claimed until CI runs.

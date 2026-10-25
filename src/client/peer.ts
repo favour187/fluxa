@@ -120,20 +120,22 @@ export class PeerSession {
 
     this.pc = new RTCPeerConnection({
       iceServers: opts.iceServers,
-      // Do not leak pre-connection ICE candidates to a peer that has not been verified.
+      // Avoid gathering before negotiation. Direct QR tickets still disclose
+      // gathered candidate IPs to the person scanning them before SAS approval.
       iceCandidatePoolSize: 0,
       bundlePolicy: 'max-bundle',
     });
     this.pc.onicecandidate = (e) => {
-      if (e.candidate) this.signal.relay(this.peer.connId, 'ice', { candidate: e.candidate.toJSON() });
+      if (!this.closed && e.candidate) this.signal.relay(this.peer.connId, 'ice', { candidate: e.candidate.toJSON() });
     };
     this.pc.onconnectionstatechange = () => {
+      if (this.closed) return;
       const s = this.pc.connectionState;
-      if (s === 'failed') this.fail('connection failed');
-      else if (s === 'disconnected') this.events.onState('connecting', 'connection interrupted');
+      if (s === 'failed') this.fail(`WebRTC connection failed (ICE: ${this.pc.iceConnectionState}). Check both devices' Wi-Fi, client isolation and VPN settings, then pair again.`);
+      else if (s === 'disconnected') this.events.onState(this.state, 'connection interrupted');
       else if (s === 'connected' && this.state === 'connecting') this.events.onState('handshaking');
     };
-    this.pc.ondatachannel = (e) => this.attachChannel(e.channel);
+    this.pc.ondatachannel = (e) => { if (!this.closed) this.attachChannel(e.channel); };
     this.pc.ontrack = (event) => {
       if (!this.verified || event.track.kind !== 'video') {
         event.track.stop(); // never surface unverified or unexpected media
@@ -165,14 +167,22 @@ export class PeerSession {
   /* Negotiation                                                       */
   /* ---------------------------------------------------------------- */
 
-  async start(): Promise<void> {
+  /**
+   * Manual QR pairing has a human exchange between offer and answer. Do not
+   * start the network timeout until the reply has actually been scanned; 25s
+   * measured from showing the invitation made real two-phone pairing expire.
+   */
+  async start(options: { manualTicket?: boolean } = {}): Promise<void> {
+    if (this.closed) return;
     this.setState('connecting');
-    this.openTimer = window.setTimeout(() => this.fail('timed out opening the data channel'), CHANNEL_OPEN_TIMEOUT_MS);
+    if (!options.manualTicket) this.armOpenTimeout();
     try {
       if (this.role === 'initiator') {
         this.attachChannel(this.pc.createDataChannel('fluxa', { ordered: true }));
         const offer = await this.pc.createOffer();
+        if (this.closed) return;
         await this.pc.setLocalDescription(offer);
+        if (this.closed) return;
         this.signal.relay(this.peer.connId, 'offer', { sdp: this.pc.localDescription });
       }
     } catch (err) {
@@ -180,15 +190,25 @@ export class PeerSession {
     }
   }
 
+  private armOpenTimeout(): void {
+    if (this.closed || this.openTimer !== null || this.channel?.readyState === 'open' ||
+        ['handshaking', 'awaiting-verification', 'connected'].includes(this.state)) return;
+    this.openTimer = window.setTimeout(() => this.fail('timed out opening the data channel; check both phones are on the same Wi-Fi and try again'), CHANNEL_OPEN_TIMEOUT_MS);
+  }
+
   async handleRelay(type: string, payload: unknown): Promise<void> {
+    if (this.closed) return;
     try {
       if (type === 'offer') {
         const { sdp } = payload as { sdp: RTCSessionDescriptionInit };
         await this.pc.setRemoteDescription(sdp);
+        if (this.closed) return;
         this.remoteDescriptionSet = true;
         await this.flushCandidates();
         const answer = await this.pc.createAnswer();
+        if (this.closed) return;
         await this.pc.setLocalDescription(answer);
+        if (this.closed) return;
         this.signal.relay(this.peer.connId, 'answer', { sdp: this.pc.localDescription });
         return;
       }
@@ -198,8 +218,12 @@ export class PeerSession {
           throw new Error('unexpected answer in state ' + this.pc.signalingState);
         }
         await this.pc.setRemoteDescription(sdp);
+        if (this.closed) return;
         this.remoteDescriptionSet = true;
         await this.flushCandidates();
+        // A manual ticket's first actual connectivity deadline begins here,
+        // after the reply is scanned. In server mode this is already armed.
+        this.armOpenTimeout();
         return;
       }
       if (type === 'ice') {
@@ -238,13 +262,14 @@ export class PeerSession {
     this.channel = channel;
     channel.binaryType = 'arraybuffer';
     channel.bufferedAmountLowThreshold = 256 * 1024;
-    channel.onopen = () => void this.sendHello();
-    channel.onclose = () => this.close('data channel closed');
-    channel.onerror = () => this.fail('data channel error');
-    channel.onmessage = (event) => this.onFrame(event.data as ArrayBuffer);
+    channel.onopen = () => { if (!this.closed) void this.sendHello(); };
+    channel.onclose = () => this.close(`WebRTC data channel closed (ICE: ${this.pc.iceConnectionState}, transport: ${this.pc.connectionState}). Keep both devices on the same reachable network and try pairing again.`);
+    channel.onerror = () => this.fail('WebRTC data channel error; the network or the remote device interrupted the connection');
+    channel.onmessage = (event) => { if (!this.closed) this.onFrame(event.data as ArrayBuffer); };
   }
 
   private async sendHello(): Promise<void> {
+    if (this.closed) return;
     if (this.openTimer !== null) {
       clearTimeout(this.openTimer);
       this.openTimer = null;
@@ -254,6 +279,7 @@ export class PeerSession {
     try {
       this.ecdh = await generateEcdhKeyPair();
       const ephPub = await exportPublicKeySpki(this.ecdh.publicKey);
+      if (this.closed) return;
       const dtls = this.localDtlsFingerprint();
       if (!dtls) throw new Error('local DTLS fingerprint unavailable');
       const nonce = randomToken(16);
@@ -269,6 +295,7 @@ export class PeerSession {
           ephPub,
         }),
       );
+      if (this.closed) return;
       this.localHello = {
         t: 'hello',
         v: PROTOCOL_VERSION,
@@ -350,6 +377,7 @@ export class PeerSession {
         }),
       );
       if (!ok) throw new Error('peer signature is invalid');
+      if (this.closed) return;
       this.remoteHello = hello;
       if (this.localHello) await this.completeHandshake();
     } catch (err) {
@@ -358,7 +386,7 @@ export class PeerSession {
   }
 
   private async completeHandshake(): Promise<void> {
-    if (!this.localHello || !this.remoteHello || !this.ecdh) return;
+    if (this.closed || this.sas || !this.localHello || !this.remoteHello || !this.ecdh) return;
     try {
       const secret = await deriveSharedSecret(this.ecdh.privateKey, this.remoteHello.ephPub);
       const transcript = buildSasTranscript({
@@ -373,6 +401,7 @@ export class PeerSession {
         nonceB: this.remoteHello.nonce,
       });
       const digest = await sha256(new TextEncoder().encode(transcript));
+      if (this.closed || this.sas) return;
       this.sas = sasDigits(digest);
       this.sessionKey = secret; // reserved for a future authenticated channel layer
       if (this.handshakeTimer !== null) {
@@ -387,7 +416,7 @@ export class PeerSession {
 
   /** Called when the local user confirms the 6-digit code matches. */
   confirmVerification(matches: boolean): void {
-    if (this.verifying || this.state !== 'awaiting-verification' || !this.sas || !this.remoteHello || !this.localHello) return;
+    if (this.closed || this.verifying || this.state !== 'awaiting-verification' || !this.sas || !this.remoteHello || !this.localHello) return;
     this.verifying = true;
     if (!matches) {
       this.signal.verify?.(this.peer.connId, false);
@@ -579,23 +608,22 @@ export class PeerSession {
   /* Teardown                                                          */
   /* ---------------------------------------------------------------- */
 
-  fail(reason: string): void {
-    if (this.state === 'failed' || this.state === 'closed') return;
-    this.setState('failed', reason);
-    this.teardown();
-    this.events.onClosed(reason);
-  }
+  fail(reason: string): void { this.terminate('failed', reason); }
 
-  close(reason: string): void {
-    if (this.state === 'closed') return;
-    this.setState('closed', reason);
+  close(reason: string): void { this.terminate('closed', reason); }
+
+  private terminate(state: 'failed' | 'closed', reason: string): void {
+    // Closing a data channel or RTCPeerConnection fires more events on some
+    // Android WebViews. Latch the FIRST reason before teardown so a transport
+    // failure cannot be overwritten by its own secondary `onclose` callback.
+    if (this.closed) return;
+    this.closed = true;
+    this.setState(state, reason);
     this.teardown();
     this.events.onClosed(reason);
   }
 
   private teardown(): void {
-    if (this.closed) return;
-    this.closed = true;
     if (this.openTimer !== null) clearTimeout(this.openTimer);
     if (this.handshakeTimer !== null) clearTimeout(this.handshakeTimer);
     if (this.pingTimer !== null) clearInterval(this.pingTimer);

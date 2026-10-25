@@ -120,6 +120,8 @@ export class FluxaUI {
   private displayedStageDeviceId: string | null = null;
   private chatDrafts = new Map<string, string>();
   private handoffTargetId: string | null = null;
+  private androidInboxSignature = '';
+  private androidTargets = new Map<string, string>();
   private qrScanStream: MediaStream | null = null;
   private qrScanFrame: number | null = null;
   private qrScanModal: HTMLElement | null = null;
@@ -198,6 +200,11 @@ export class FluxaUI {
     handoffBanner.id = 'handoff-banner';
     handoffBanner.dataset.testid = 'handoff-banner';
     handoffBanner.hidden = true;
+    const androidInbox = el('section', 'panel android-inbox');
+    androidInbox.id = 'android-inbox';
+    androidInbox.dataset.testid = 'android-inbox';
+    androidInbox.setAttribute('aria-label', 'Shared from other Android apps');
+    androidInbox.hidden = true;
 
     const main = el('main', 'grid');
 
@@ -254,7 +261,7 @@ export class FluxaUI {
     sr.setAttribute('role', 'status');
     sr.setAttribute('aria-live', 'polite');
 
-    this.root.append(header, clipboardBanner, screenBanner, handoffBanner, main, overlay, toasts, sr);
+    this.root.append(header, clipboardBanner, screenBanner, handoffBanner, androidInbox, main, overlay, toasts, sr);
 
     this.q('#pair-btn').addEventListener('click', () => this.openPairing());
     this.q('#this-device').addEventListener('click', () => this.openSettings());
@@ -279,6 +286,7 @@ export class FluxaUI {
     this.renderClipboardBanner(snapshot);
     this.renderScreenBanner(snapshot);
     this.renderHandoffBanner(snapshot);
+    this.renderAndroidInbox(snapshot);
     this.renderStage(snapshot);
     this.renderTransfers(snapshot);
     this.renderReceivedShares(snapshot);
@@ -288,6 +296,83 @@ export class FluxaUI {
     this.renderVerification(snapshot);
     this.renderIncomingShare(snapshot);
     this.renderToasts(snapshot);
+  }
+
+  private renderAndroidInbox(snapshot: AppSnapshot): void {
+    const inbox = this.q('#android-inbox');
+    inbox.hidden = snapshot.androidInbox.length === 0;
+    if (inbox.hidden) {
+      inbox.replaceChildren(); // don't leave delivered links/files in the hidden DOM
+      this.androidInboxSignature = '';
+      return;
+    }
+    const peers = snapshot.sessions.filter((s) => s.verified && s.state === 'connected');
+    const signature = JSON.stringify([
+      snapshot.androidInbox.map((item) => [item.id, item.sending, item.delivered, item.error]),
+      peers.map((peer) => [peer.deviceId, peer.name, peer.connId]),
+    ]);
+    if (this.androidInboxSignature === signature) return;
+    this.androidInboxSignature = signature;
+    inbox.replaceChildren();
+    const heading = el('div', 'android-inbox-heading');
+    heading.append(el('h2', undefined, 'From Android Share'),
+      el('p', 'muted small', 'Chrome links, text, photos and files you shared to Fluxa. Review each item, choose a verified device, then send. Nothing leaves this phone until you tap Send.'));
+    inbox.append(heading);
+
+    for (const item of snapshot.androidInbox) {
+      const card = el('article', 'android-share-card');
+      card.dataset.testid = 'android-share-item';
+      const title = item.files.length
+        ? `${item.files.length} file${item.files.length === 1 ? '' : 's'} · ${formatBytes(item.files.reduce((sum, f) => sum + f.size, 0))}`
+        : item.title.trim() || 'Text or link';
+      card.append(el('strong', undefined, title));
+      if (item.files.length) {
+        const names = el('p', 'muted small', item.files.slice(0, 3).map((f) => f.name).join(' · ') +
+          (item.files.length > 3 ? ` · +${item.files.length - 3} more` : ''));
+        card.append(names);
+      }
+      if (item.text) {
+        const preview = el('pre', 'android-share-preview', item.text);
+        preview.dataset.testid = 'android-share-preview';
+        card.append(preview);
+      }
+      if (item.error) card.append(el('p', 'error-text', item.error));
+      if (!peers.length) card.append(el('p', 'muted small',
+        'No verified connection right now. Pair both devices while Fluxa is open; your share remains here for a later attempt.'));
+      const controls = el('div', 'android-share-actions');
+      const select = el('select');
+      select.dataset.testid = 'android-share-target';
+      select.setAttribute('aria-label', 'Choose a verified destination');
+      const prompt = el('option', undefined, 'Choose destination');
+      prompt.value = '';
+      select.append(prompt);
+      for (const peer of peers) {
+        const option = el('option', undefined, peer.name);
+        option.value = peer.deviceId;
+        select.append(option);
+      }
+      const chosen = this.androidTargets.get(item.id);
+      select.value = chosen && peers.some((peer) => peer.deviceId === chosen)
+        ? chosen : peers.length === 1 ? peers[0]!.deviceId : '';
+      select.disabled = item.sending || item.delivered || !peers.length;
+      select.addEventListener('change', () => this.androidTargets.set(item.id, select.value));
+      const send = el('button', 'btn btn-primary btn-sm', item.delivered ? 'Already delivered' :
+        item.sending ? 'Waiting for receipt…' : 'Send to device');
+      send.type = 'button';
+      send.dataset.testid = 'android-share-send';
+      send.disabled = item.sending || item.delivered || !select.value;
+      send.addEventListener('click', () => { if (select.value) void this.app.deliverAndroidShare(item.id, select.value); });
+      const discard = el('button', 'btn btn-ghost btn-sm', 'Discard');
+      discard.type = 'button';
+      discard.dataset.testid = 'android-share-discard';
+      discard.disabled = item.sending;
+      discard.addEventListener('click', () => {
+        if (confirm('Discard this staged share from this phone?')) void this.app.discardAndroidShare(item.id);
+      });
+      controls.append(select, send, discard);
+      card.append(controls);
+      inbox.append(card);
+    }
   }
 
   private renderStatus(snapshot: AppSnapshot): void {
@@ -300,7 +385,13 @@ export class FluxaUI {
       offline: 'Offline',
     };
     pill.dataset.state = snapshot.status;
-    label.textContent = map[snapshot.status] ?? snapshot.status;
+    const directLive = snapshot.sessions.some((s) => s.state === 'connected' && s.verified);
+    label.textContent = snapshot.status === 'offline'
+      ? (directLive ? 'Direct connected' : 'No pairing server')
+      : map[snapshot.status] ?? snapshot.status;
+    pill.title = snapshot.status === 'offline'
+      ? 'Only the optional signalling server is offline; Direct QR pairing can still work on the same network.'
+      : 'Pairing server status (not the WebRTC connection status).';
 
     const chip = this.q<HTMLButtonElement>('#this-device');
     chip.replaceChildren();
@@ -642,7 +733,18 @@ export class FluxaUI {
         btn.addEventListener('click', () => this.openVerification(session));
         waiting.append(btn);
       }
-      if (session.error) waiting.append(el('p', 'error-text', session.error));
+      if (session.error) {
+        const reason = el('p', 'error-text', `Reason: ${session.error}`);
+        reason.dataset.testid = 'disconnect-reason';
+        waiting.append(reason);
+      }
+      if (unavailable) {
+        const retry = el('button', 'btn btn-ghost', 'Pair again');
+        retry.type = 'button';
+        retry.dataset.testid = 'retry-pairing';
+        retry.addEventListener('click', () => this.openPairing());
+        waiting.append(retry);
+      }
       stage.append(waiting);
       return;
     }
@@ -1260,6 +1362,9 @@ export class FluxaUI {
 
   private openPairing(): void {
     const overlay = this.openOverlay();
+    // A newly opened dialog cannot inherit the previous dialog's observed code
+    // and auto-close because that earlier ticket was consumed.
+    this.sawPairingCode = false;
     const modal = el('div', 'modal modal-pair');
     modal.setAttribute('role', 'dialog');
     modal.setAttribute('aria-modal', 'true');
@@ -1364,7 +1469,7 @@ export class FluxaUI {
         panel.hidden = panel.dataset.panel !== name;
       }
       if (name === 'code') this.app.requestPairingCode();
-      this.renderDirectPanel(this.snapshot!);
+      this.renderDirectPanel(this.app.snapshot());
     };
     for (const tab of modal.querySelectorAll<HTMLElement>('[data-pair-tab]')) {
       tab.addEventListener('click', () => selectTab(tab.dataset.pairTab!));
@@ -1398,9 +1503,9 @@ export class FluxaUI {
     this.pairingModal = modal;
     this.autoSwitchedDirect = false;
     // If there is no signalling server, open straight into the mode that works.
-    if (this.snapshot?.status === 'offline') selectTab('direct');
+    if (this.app.snapshot().status === 'offline') selectTab('direct');
     else this.app.requestPairingCode();
-    this.syncPairingModal(this.snapshot!);
+    this.syncPairingModal(this.app.snapshot());
   }
 
   /** Read a camera QR locally. BarcodeDetector is an optimization, not a requirement. */
@@ -1606,9 +1711,10 @@ export class FluxaUI {
     const offlineNotice = modal.querySelector<HTMLElement>('#offline-notice')!;
     offlineNotice.hidden = !offline;
 
-    if (direct && (direct.step === 'connecting' || snapshot.sessions.some((s) => s.state === 'awaiting-verification' || s.state === 'connected'))) {
-      // The handshake (or a live session) is up: hand over to the normal
-      // verification / device UI instead of leaving this dialog in the way.
+    if (direct && (direct.step === 'connecting' ||
+        direct.sessionState === 'awaiting-verification' || direct.sessionState === 'connected')) {
+      // Only THIS pairing's handshake may dismiss its dialog. An unrelated
+      // connected peer must not cancel a fresh Direct QR attempt.
       this.closeModal(modal);
       this.app.finishDirectPairing();
       return;

@@ -22,14 +22,26 @@
                 <action android:name="android.intent.action.MAIN" />
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
-            <!-- External camera / share app may open a single-use pairing code. -->
+            <!-- External camera may open a single-use pairing code. -->
             <intent-filter>
                 <action android:name="android.intent.action.VIEW" />
                 <category android:name="android.intent.category.DEFAULT" />
                 <category android:name="android.intent.category.BROWSABLE" />
                 <data android:scheme="fluxa" android:host="pair" />
             </intent-filter>
-
+            <!-- Explicit OS Share target: Chrome tab URLs/text, Files, Photos,
+                 and other apps that expose ACTION_SEND. No Accessibility,
+                 overlay or background clipboard permission is requested. -->
+            <intent-filter android:label="Share to Fluxa">
+                <action android:name="android.intent.action.SEND" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
+            <intent-filter android:label="Share files to Fluxa">
+                <action android:name="android.intent.action.SEND_MULTIPLE" />
+                <category android:name="android.intent.category.DEFAULT" />
+                <data android:mimeType="*/*" />
+            </intent-filter>
         </activity>
 
         <provider

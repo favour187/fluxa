@@ -1797,3 +1797,14 @@ body{background:var(--bg);color:var(--text)}.aurora{opacity:.14}.aurora .blob{fi
 .rule-form .switch-row input[type=checkbox]{width:18px;min-width:18px;height:18px;flex:none}
 .rule-form .modal-actions{display:flex;flex-wrap:wrap;gap:8px}
 @media(max-width:680px){.clipboard-banner{position:static;padding:12px;gap:10px}.clipboard-actions{width:100%}.clipboard-actions>.btn{flex:1 1 130px}.handoff-banner select{max-width:100%;flex:1 1 100%}}
+
+/* OS Share target: private, review-first inbox (only mounted for Android shares). */
+.android-inbox{display:grid;gap:14px;border-color:#bcdba8;background:linear-gradient(140deg,#fff,#f5fbee)}
+.android-inbox-heading{display:grid;gap:5px}.android-inbox-heading h2{font-size:16px;color:#285632;letter-spacing:-.02em}.android-inbox-heading p{margin:0;max-width:75ch}
+.android-share-card{display:grid;gap:11px;min-width:0;padding:15px;border:1px solid #dce8d3;border-radius:16px;background:#fff}
+.android-share-card>strong{font-size:14px;overflow-wrap:anywhere}.android-share-card>.muted{margin:0;overflow-wrap:anywhere}
+.android-share-preview{max-height:145px;overflow:auto;white-space:pre-wrap;overflow-wrap:anywhere;margin:0;padding:12px;border:1px solid #dce7dc;border-radius:10px;background:#f7faf6;color:#253c2c;font:12px/1.5 var(--mono)}
+.android-share-actions{display:flex;gap:8px;flex-wrap:wrap;align-items:center}
+.android-share-actions select{flex:1 1 180px;min-width:0;min-height:43px;padding:8px 11px;border-radius:11px;border:1px solid #cbd8ce;color:#17241d;background:#fff}
+.android-share-actions .btn{min-height:43px}
+@media(max-width:680px){.android-share-actions{display:grid;grid-template-columns:minmax(0,1fr) auto}.android-share-actions select{grid-column:1/-1}.android-share-actions .btn-primary{grid-column:1}.android-share-actions .btn-ghost{grid-column:2}}

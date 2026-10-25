@@ -1,5 +1,22 @@
 # Fluxa 0.2.0 — verification and release-readiness record
 
+## Android two-phone incident and native Share follow-up (2026-10-25)
+
+**Baseline, not fixed:** merged PR #5 `e5940ed8aabd167dabff27bf6db29d96f6295cf9` passed all nine [pipeline-42](https://app.circleci.com/pipelines/github/favour187/fluxa/42) jobs. Its downloaded signed APK (SHA-256 `e9f33beba807818832ad3a8d875509d14017f5b094d54454c20c52dbc9238e71`) and signed AAB (SHA-256 `ec161225cfe112af257a6fdc6cebc496c04ee90caf36b217ab2efe693dba0846`) matched that job's manifests and signatures, and the APK's camera features are optional. The user installed this version on two real Android phones: after exchanging Direct invitation/reply QRs and approving the SAS **while both apps remained open**, the connection immediately dropped. That failure is real; no cause has been confirmed from the single screenshot. Earlier test results below are historical, not success claims for those phones.
+
+**Follow-up source, NOT a release:** Branch `work/android-stability-native-share` now keeps the first WebRTC disconnect reason/ICE state, postpones a manual QR deadline until the reply, guards late peer-handshake events, prevents an asynchronous Direct completion from republishing a stale ticket after SAS, and replaces old sessions when re-pairing. It adds a native `ACTION_SEND`/`ACTION_SEND_MULTIPLE` staging inbox requiring sender review and verified receiver consent. A new re-pair browser test initially failed, exposed the stale-ticket race, then passed three consecutive isolated repeats and the final full suite. This is not proof of the two-phone root cause. Local checks after the last TypeScript/native edits:
+
+| Check | Actual result |
+| --- | --- |
+| `npm run check`; `npm test` | Passed strict TypeScript; **102/102** Node/unit/security/extension tests. |
+| `npm run test:e2e -- --reporter=line` | **35/35** Chromium tests passed (~6.2 min), including serverless Direct WebRTC, repeated pairing after SAS and one Android Share test with a **simulated Capacitor plugin**. Not a real Android share-sheet/ContentResolver test. |
+| `npm run android:sync` | Passed; refreshed packaged web bundle. Not proof of an installed app. |
+| `:app:testDebugUnitTest :app:assembleDebug assembleRelease bundleRelease` | Passed locally using JDK 17/Android SDK 34 and one worker; two Java filename-sanitization tests, Android release vital lint, debug APK and unsigned release APK/AAB. An earlier combined build with two workers exhausted the ~2 GiB sandbox and its daemon vanished; the complete lower-heap one-worker retry passed without disabling lint/tests. |
+| Compiled APK inspection | `aapt2 dump xmltree`: `SEND` + `SEND_MULTIPLE`. DEX includes `FluxaIncomingSharePlugin`. `aapt2 dump badging`: all implied camera hardware optional. `apksigner verify` confirms the debug APK has the **Android debug** certificate and the release APK **does not verify**. `jarsigner -verify` reports the local AAB unsigned. |
+| `git diff --check` | Passed. No revised CircleCI run or signing for this branch. |
+
+**Testing artifact (debug only):** locally built `com.fluxa.transfer.debug` (**Fluxa Test** launcher/share-sheet label), SHA-256 `2878ead50f6138bbc83665c33a9b8588ef2fad9c6602f16fa0c46b933223a9ed`. It installs alongside—not over—the old `com.fluxa.transfer` release, with a *different* identity and data store. It must be installed on **both** test phones to compare the new source. The local release APK SHA-256 `8f49d59842f272b290b5de89111c988d39c3b023a8a3ab8fe8cc47d2e16dca79` and AAB SHA-256 `352bd0349f300b05b8b3c703cddf3af44214d99679a0f77e94154f44e9d2d901` are unsigned: **do not install or distribute them**. There has been no retest on actual phones or installed package and no new release-key signature. Physical verification plus CI on the follow-up commit are still gates.
+
 ## Post-merge CI and Android hardware-filter correction (2026-10-25)
 
 PR #4's combined feature commit `aff40bc` passed **all six** branch pipeline 39 jobs (validate, security, browser E2E, desktop E2E, web, Linux). PR #4 was **merged** as `393fa38f0559`; [main pipeline 40](https://app.circleci.com/pipelines/github/favour187/fluxa/40) passed **all nine** jobs, including Android, Windows and unsigned-mac package builds. PR #4's earlier pipeline 38 failures are historical and do not describe the merged code.
