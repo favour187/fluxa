@@ -16,6 +16,7 @@ import {
   renameDevice,
   selectDevice,
   sendAndAccept,
+  stageAndSend,
   sha256,
   sha256OfFile,
   textFile,
@@ -89,7 +90,7 @@ test('streams a 32 MB file to disk without blowing up memory', async () => {
     });
 
   const before = await heap();
-  await a.page.getByTestId('file-input').setInputFiles(path);
+  await stageAndSend(a.page, path);
   await expect(b.page.getByTestId('incoming-modal')).toBeVisible({ timeout: 30_000 });
   await b.page.getByTestId('accept-transfer').click();
   await waitForState(b.page, 'complete', 180_000);
@@ -131,7 +132,7 @@ test('transfers several files in one batch, in order', async () => {
 });
 
 test('declining a transfer leaves the sender informed and nothing completed', async () => {
-  await a.page.getByTestId('file-input').setInputFiles([randomFile('reject-me.bin', 20_000)]);
+  await stageAndSend(a.page, [randomFile('reject-me.bin', 20_000)]);
   await expect(b.page.getByTestId('incoming-modal')).toBeVisible({ timeout: 30_000 });
   await b.page.getByTestId('decline-transfer').click();
 
@@ -150,7 +151,7 @@ test('cancelling mid-transfer stops both sides and produces no file', async () =
   // Large enough that the transfer is still running when Cancel is clicked, even
   // on a fast CI box where a 20 MB file finishes in a few hundred milliseconds.
   await writeFile(bigPath, randomBytes(128 * 1024 * 1024));
-  await a.page.getByTestId('file-input').setInputFiles([bigPath]);
+  await stageAndSend(a.page, [bigPath]);
   await b.page.getByTestId('accept-transfer').click();
   await waitForState(a.page, 'transferring');
 
@@ -193,13 +194,13 @@ test('cancelling mid-transfer stops both sides and produces no file', async () =
 test('a second send is queued instead of running in parallel', async () => {
   const first = randomFile('first.bin', 16 * 1024 * 1024);
   const second = textFile('second.txt', 'queued behind the first');
-  await a.page.getByTestId('file-input').setInputFiles([first]);
+  await stageAndSend(a.page, [first]);
   await b.page.getByTestId('accept-transfer').click();
   await waitForState(a.page, 'transferring');
 
   // A second manifest while a transfer is in flight must not be accepted by the
   // receiver; the sender queues it locally instead.
-  await a.page.getByTestId('file-input').setInputFiles([second]);
+  await stageAndSend(a.page, [second]);
   const concurrent = await b.page.evaluate(() => {
     const snapshot = (window as unknown as { __fluxa: { snapshot: () => { transfers: { state: string }[] } } }).__fluxa.snapshot();
     return snapshot.transfers.filter((t) => t.state === 'transferring' || t.state === 'incoming').length;
@@ -212,7 +213,7 @@ test('a second send is queued instead of running in parallel', async () => {
 
 test('progress never reports completion before verification', async () => {
   const spec = randomFile('progress.bin', 4 * 1024 * 1024);
-  await a.page.getByTestId('file-input').setInputFiles([spec]);
+  await stageAndSend(a.page, [spec]);
   await b.page.getByTestId('accept-transfer').click();
 
   // Watch the receiver's state sequence: it must pass through transferring/

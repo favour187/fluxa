@@ -150,6 +150,8 @@ test('pairs, verifies and transfers with no signalling server (direct code)', as
 
   await expect(host.page.getByTestId('dropzone')).toBeVisible({ timeout: 30_000 });
   await host.page.getByTestId('file-input').setInputFiles(filePath);
+  await expect(host.page.getByTestId('edge-send-card')).toBeVisible();
+  await host.page.getByTestId('send-staged').click();
   await expect(guest.page.getByTestId('incoming-modal')).toBeVisible({ timeout: 60_000 });
   await guest.page.getByTestId('accept-transfer').click();
 

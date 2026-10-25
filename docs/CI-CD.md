@@ -1,16 +1,16 @@
 # CircleCI: what ran and what still requires a runner
 
 CI configuration is [`.circleci/config.yml`](../.circleci/config.yml). Each
-actual job is explicit; no checks are silently disabled. On **2026-10-25**, the
-latest public `main` pipeline visible through CircleCI's **unauthenticated** API
-was [pipeline 17](https://app.circleci.com/pipelines/github/favour187/fluxa/17)
-for upstream commit `e58c3ffc56a29d058a037bc6908d2529b6e61d70`. Its `main`
-workflow finished **success** with `validate`, `security`, `e2e-browser`,
-`e2e-desktop`, `build-web`, `build-linux`, `build-windows`,
-`build-macos-unsigned` and `build-android` successful. These were runs of the
-**previous upstream revision**; they do **not** test the local working tree,
-protocol v2, iOS project or new recovery/sharing tests. No CI URL is claimed
-for unpushed work.
+actual job is explicit; no checks are silently disabled. Historical results
+must not be confused with a check of the current revision: on **2026-10-25**,
+[pipeline 19](https://app.circleci.com/pipelines/github/favour187/fluxa/19)
+passed all nine default jobs for `b11bea3` (including signed Android outputs),
+while pre-merge [pipeline 29](https://app.circleci.com/pipelines/github/favour187/fluxa/29)
+failed validation and both browser/desktop E2E at `6c49508`. That revision
+changed file selection to stage files for an explicit send, but the tests still
+assumed immediate sending; it also contained two chat typing errors. Package
+jobs were blocked by validation. These are **past revisions**; consult the
+workflow for the commit being evaluated before claiming CI is green.
 
 You can monitor a **public** repository without supplying a personal token:
 
@@ -45,10 +45,19 @@ on the CircleCI plan and an authorised operator; **none was triggered here**.
   **17**, Android job **173** did have signing enabled: its public build manifest
   reports the APK and AAB signed. The APK's SHA-256 matches the manifest and
   independent `apksigner verify --verbose --print-certs` confirms release-key
-  APK v1/v2 signatures (one `CN=Fluxa, OU=Fluxa Releases` signer). The *new*
-  revision still needs its own signed job and artifact verification.
+  APK v1/v2 signatures (one `CN=Fluxa, OU=Fluxa Releases` signer). Pipeline
+  **19** on `b11bea3` also produced independently checked signed APK/AAB
+  outputs. Neither result proves signing or functionality of a *later* revision;
+  check that revision's Android job and artifacts separately.
 - `build-macos-unsigned`: Linux produces a macOS-shaped unsigned zip, **not** a
   tested/notarised macOS release.
+
+Each package manifest scans its platform's actual CI output directory
+(`dist-linux`, `dist-windows`, `dist-macos`, Android release outputs or the web
+archive), records file hashes/signing evidence, and **fails** if the inventory
+is empty. This corrects the empty desktop manifests in pipeline 19; it does
+not retroactively attest those older uploads. Installer/runtime testing and
+code signing remain separate checks.
 
 When the optional `macos_runner` pipeline parameter is enabled on a plan with
 Mac machines: `build-macos` compiles desktop dmg/zip, and the **new**
@@ -59,8 +68,8 @@ signed App Store package. This job **has not run**, so iOS is source/sync-only.
 
 Release-tag workflows include a **manual hold** and, if an operator supplies
 proper separate credentials, may create a draft GitHub release. Do not confuse
-those publishing secrets with Fluxa's coturn REST/enrolment secrets. For this
-request no tag, publishing operation or intermediate branch push is permitted.
+those publishing secrets with Fluxa's coturn REST/enrolment secrets. Merging
+source to `main` runs ordinary CI; it does not publish or tag a release.
 
 CI artifacts are not bundled into the git tree; consult the run's artifacts
 and build manifests for actual hashes/signing state. See [RELEASE.md](RELEASE.md)

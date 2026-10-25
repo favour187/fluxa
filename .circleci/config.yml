@@ -87,7 +87,7 @@ commands:
           name: Generate build manifest
           command: |
             mkdir -p << parameters.out >>
-            node scripts/build-manifest.mjs --out << parameters.out >> --platform << parameters.platform >>
+            node scripts/build-manifest.mjs --out << parameters.out >> --platform << parameters.platform >> --require-artifacts
   fail_if_no_artifacts:
     parameters:
       pattern:
@@ -265,7 +265,7 @@ jobs:
       - run:
           name: Generate build manifest
           command: |
-            node scripts/build-manifest.mjs --out artifacts/manifest-web --platform web
+            node scripts/build-manifest.mjs --out artifacts/manifest-web --platform web --require-artifacts
       - fail_if_no_artifacts:
           pattern: artifacts/web/*.zip
       - store_artifacts:

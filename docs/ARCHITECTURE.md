@@ -8,6 +8,7 @@ Browser / Capacitor WKWebView / Android WebView / Electron renderer
     peer.ts       -> DTLS-bound ECDH transcript + six-digit SAS
     transfer/*    -> shared chunked sender, receiver, journal, OPFS sink, exports
     share.ts      -> optional explicitly approved text/link/work-link module
+    app.ts / ui.ts -> ephemeral verified-peer chat, staged file send, ripple
                          |
               verified WebRTC DataChannel
                          |
@@ -34,7 +35,9 @@ Direct codes (`FLX1…`) encode the offer/answer and public identity; their
 `protocolVersion: 2` prevents accidentally pairing with the previous wire
 format. Each new pairing needs a fresh SAS, even for a previously trusted key.
 No server can silently verify on the user's behalf. On direct codes, the
-signalling stage is skipped, not the peer authentication stage.
+signalling stage is skipped, not the peer authentication stage. Rendered QR
+codes use a four-module white quiet zone; tickets that cannot fit a QR keep
+the full Copy/Share fallback rather than truncating the pairing data.
 
 ## Files, folders, and recovery
 
@@ -68,6 +71,24 @@ file, hash/size check and an exclusive commit (no silent overwrite). Native
 Capacitor exports write 64 KiB base64 chunks into a unique Documents directory,
 then may offer the OS share sheet. On browsers without a directory picker, Save
 falls back to downloads and cannot guarantee a folder tree in Downloads.
+
+Files chosen through the file/folder picker are staged for the selected device;
+the sender must swipe the card to the screen edge or activate **Send now**.
+Switching devices cannot silently redirect the staged batch. Drag-and-drop
+remains a direct-send path, with the receiver's usual explicit approval.
+During transfer the sender and receiver show a visual pulse; reduced-motion
+settings disable its animation. Neither gesture nor animation changes the
+verified file protocol.
+
+## Quick messages
+
+The client sends text only to a verified connected device over the same
+authenticated WebRTC control channel, with a 4,000 **UTF-8 byte** limit. Each
+message has a unique id and timestamp; the receiver acknowledges it, and the
+sender displays sending, delivered or failed (including connection loss or a
+30-second acknowledgement timeout). Duplicate ids are not displayed twice.
+Messages live in the current app session only: no broker store, offline queue,
+cross-restart history, guarantee of remote reading, or unverified-device chat.
 
 ## Content sharing is deliberately separate
 

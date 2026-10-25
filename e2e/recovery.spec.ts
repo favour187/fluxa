@@ -4,7 +4,7 @@ import { copyFile, mkdir, mkdtemp, open, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { randomBytes } from 'node:crypto';
-import { downloadReceived, openClient, pair, renameDevice, selectDevice, sha256OfFile, waitForState } from './helpers';
+import { downloadReceived, openClient, pair, renameDevice, selectDevice, stageAndSend, sha256OfFile, waitForState } from './helpers';
 
 async function transfer(page: Page) {
   return page.evaluate(() => (window.__fluxa!.snapshot() as any).transfers[0] as {
@@ -47,7 +47,7 @@ test('interrupted send resumes from rehashed OPFS bytes after both browser tabs 
     const file = join(dir, 'restart.bin');
     await writeFile(file, randomBytes(48 * 1024 * 1024));
     const expected = await sha256OfFile(file);
-    await a.page.getByTestId('file-input').setInputFiles(file);
+    await stageAndSend(a.page, file);
     await b.page.getByTestId('accept-transfer').click();
     await expect.poll(async () => (await transfer(b.page)).transferredBytes, { timeout: 30_000 }).toBeGreaterThan(2 * 1024 * 1024);
     const { id, files } = await transfer(b.page);
@@ -129,7 +129,7 @@ test('a corrupted stored prefix is refused before any resumed bytes are trusted'
     await selectDevice(a.page, 'Destination');
     const file = join(dir, 'tamper.bin');
     await writeFile(file, randomBytes(32 * 1024 * 1024));
-    await a.page.getByTestId('file-input').setInputFiles(file);
+    await stageAndSend(a.page, file);
     await b.page.getByTestId('accept-transfer').click();
     await expect.poll(async () => (await transfer(b.page)).transferredBytes, { timeout: 30_000 }).toBeGreaterThan(2 * 1024 * 1024);
     const { id, files } = await transfer(b.page);

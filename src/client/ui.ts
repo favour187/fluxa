@@ -113,6 +113,11 @@ export class FluxaUI {
   private fileInput: HTMLInputElement;
   private folderInput: HTMLInputElement;
   private stagedFiles: File[] = [];
+  private stagedForDeviceId: string | null = null;
+  private stagedRevision = 0;
+  private stageSignature = '';
+  private displayedStageDeviceId: string | null = null;
+  private chatDrafts = new Map<string, string>();
 
   constructor(
     private readonly app: FluxaApp,
@@ -436,11 +441,25 @@ export class FluxaUI {
 
   private renderStage(snapshot: AppSnapshot): void {
     const stage = this.q('#stage');
-    // Both endpoints show the same transfer pulse while bytes are moving.
-    // This is visual feedback only; the verified WebRTC transfer stays unchanged.
+    // Progress changes many times per second. Keep the swipe card and message
+    // input mounted unless their own content changes, so typing is not lost.
     stage.classList.toggle('transfer-rippling', snapshot.transfers.some((transfer) => transfer.state === 'transferring'));
-    stage.replaceChildren();
     const session = this.selectedSession(snapshot);
+    const messageSignature = snapshot.messages.filter((m) => m.deviceId === session?.deviceId)
+      .slice(-12).map((m) => `${m.id}:${m.status}`).join('|');
+    const signature = JSON.stringify([
+      session?.deviceId, session?.connId, session?.name, session?.platform,
+      session?.state, session?.verified, session?.error,
+      session?.connection?.direct, session?.connection?.type,
+      snapshot.iceConfigured, this.stagedForDeviceId, this.stagedRevision, messageSignature,
+    ]);
+    if (signature === this.stageSignature) return;
+    this.stageSignature = signature;
+    const previousInput = stage.querySelector<HTMLInputElement>('.chat-input');
+    const restoreFocus = previousInput === document.activeElement && this.displayedStageDeviceId === session?.deviceId;
+    const caret = previousInput?.selectionStart ?? 0;
+    stage.replaceChildren();
+    this.displayedStageDeviceId = session?.deviceId ?? null;
 
     if (!session) {
       stage.innerHTML = `
@@ -551,21 +570,28 @@ export class FluxaUI {
 
     stage.append(drop, buttons);
 
-    if (this.stagedFiles.length) {
+    if (this.stagedFiles.length && this.stagedForDeviceId === session.deviceId) {
       const swipe = el('section', 'edge-send-card');
       const summary = el('div');
       summary.append(el('p', 'eyebrow', 'Ready to move'));
       summary.append(el('strong', undefined, this.stagedFiles.length === 1 ? this.stagedFiles[0]!.name : this.stagedFiles.length + ' selected items'));
-      summary.append(el('p', 'muted tiny', 'Swipe this card to the right edge to send, or tap Send now.'));
+      summary.append(el('p', 'muted tiny', `To ${session.name} · Swipe this card to the right edge to send, or tap Send now.`));
       const actions = el('div', 'edge-send-actions');
       const clear = el('button', 'btn btn-ghost btn-xs', 'Clear'); clear.type = 'button';
-      clear.addEventListener('click', () => { this.stagedFiles = []; this.renderStage(this.snapshot!); });
+      clear.dataset.testid = 'clear-staged';
+      clear.addEventListener('click', () => {
+        this.stagedFiles = []; this.stagedForDeviceId = null;
+        this.stagedRevision++; this.renderStage(this.snapshot!);
+      });
       const sendNow = el('button', 'btn btn-primary btn-sm', 'Send now'); sendNow.type = 'button';
+      sendNow.dataset.testid = 'send-staged';
       sendNow.addEventListener('click', () => this.sendStaged());
       actions.append(clear, sendNow); swipe.append(summary, actions);
       let startX = 0, startY = 0, startRight = 0, dragging = false;
       const resetSwipe = () => { dragging = false; swipe.style.transform = ''; swipe.classList.remove('is-dragging', 'edge-ready'); };
       swipe.addEventListener('pointerdown', (event) => {
+        // Pointer capture on the parent would otherwise swallow the buttons' clicks.
+        if ((event.target as Element).closest('button, input, a')) return;
         if (event.pointerType === 'mouse' && event.button !== 0) return;
         startX = event.clientX; startY = event.clientY; startRight = swipe.getBoundingClientRect().right; dragging = true;
         try { swipe.setPointerCapture(event.pointerId); } catch { /* capture can fail if the pointer is already cancelled */ }
@@ -604,9 +630,24 @@ export class FluxaUI {
     }
     const form = el('form', 'chat-form'); const input = el('input', 'chat-input');
     input.type = 'text'; input.maxLength = 4000; input.autocomplete = 'off'; input.placeholder = 'Write a message…'; input.setAttribute('aria-label', 'Message');
+    input.value = this.chatDrafts.get(session.deviceId) ?? '';
+    input.addEventListener('input', () => this.chatDrafts.set(session.deviceId, input.value));
     const send = el('button', 'btn btn-primary btn-sm', 'Send'); send.type = 'submit'; form.append(input, send);
-    form.addEventListener('submit', (event) => { event.preventDefault(); if (!input.value.trim()) return; this.app.sendChatMessage(session.deviceId, input.value); input.value = ''; });
+    form.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const text = input.value;
+      if (!text.trim()) return;
+      // sendChatMessage emits synchronously: clear the draft before it re-renders.
+      this.chatDrafts.delete(session.deviceId);
+      input.value = '';
+      if (!this.app.sendChatMessage(session.deviceId, text)) {
+        this.chatDrafts.set(session.deviceId, text);
+        const current = stage.querySelector<HTMLInputElement>('.chat-input');
+        if (current) { current.value = text; current.focus(); }
+      }
+    });
     chat.append(head, list, form); stage.append(chat);
+    if (restoreFocus) { input.focus(); input.setSelectionRange(caret, caret); }
 
     const note = el('p', 'small muted stage-note');
     note.textContent = snapshot.iceConfigured
@@ -621,17 +662,21 @@ export class FluxaUI {
   }
 
   private onFilesPicked(list: FileList | null): void {
-    if (!list) return;
+    if (!list?.length || !this.selectedDeviceId) return;
     this.stagedFiles = Array.from(list);
+    this.stagedForDeviceId = this.selectedDeviceId;
+    this.stagedRevision++;
     this.fileInput.value = '';
     this.folderInput.value = '';
     if (this.snapshot) this.renderStage(this.snapshot);
   }
 
   private sendStaged(): void {
-    if (!this.stagedFiles.length) return;
+    if (!this.stagedFiles.length || this.stagedForDeviceId !== this.selectedDeviceId) return;
     const files = this.stagedFiles;
     this.stagedFiles = [];
+    this.stagedForDeviceId = null;
+    this.stagedRevision++;
     this.send(files);
     if (this.snapshot) this.renderStage(this.snapshot);
   }
@@ -1233,36 +1278,44 @@ export class FluxaUI {
   }
 
   /**
-   * Renders a QR code. Only short payloads are attempted: a long one forces the
-   * generator into a huge version, and a canvas of that size exhausts the
-   * renderer's memory (a real crash, not a slow path). Callers must offer
-   * copy/share instead for anything longer.
+   * Render a QR code with the required four-module quiet zone. The explicit
+   * payload ceiling avoids allocating an enormous canvas for malformed input;
+   * callers keep Copy/Share available whenever QR rendering is unavailable.
    */
   private renderQr(text: string): HTMLElement {
     try {
-      if (text.length > 1800) return el('div', 'qr-fallback', 'Code too long for QR — use Copy or Share');
+      if (!text || text.length > 1800) {
+        return el('div', 'qr-fallback', 'QR unavailable — use Copy or Share');
+      }
       const qr = qrcode(0, 'L');
       qr.addData(text);
       qr.make();
       const count = qr.getModuleCount();
-      // Scale the QR to a fixed, scan-friendly canvas instead of rejecting it
-      // merely because its module count grows with longer tickets.
-      const cell = Math.max(2, Math.min(6, Math.floor(600 / count)));
+      const quietZone = 4;
+      // Keep a useful pixel size for both short codes and longer direct tickets.
+      const cell = Math.max(2, Math.min(6, Math.floor(600 / (count + quietZone * 2))));
+      const side = (count + quietZone * 2) * cell;
       const canvas = document.createElement('canvas');
-      canvas.width = count * cell;
-      canvas.height = count * cell;
-      const ctx = canvas.getContext('2d')!;
+      canvas.width = side;
+      canvas.height = side;
+      canvas.setAttribute('role', 'img');
+      canvas.setAttribute('aria-label', 'QR code for Fluxa device pairing');
+      canvas.dataset.testid = 'rendered-pairing-qr';
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return el('div', 'qr-fallback', 'QR unavailable — use Copy or Share');
       ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillRect(0, 0, side, side);
       ctx.fillStyle = '#08090d';
       for (let row = 0; row < count; row++) {
         for (let col = 0; col < count; col++) {
-          if (qr.isDark(row, col)) ctx.fillRect(col * cell, row * cell, cell, cell);
+          if (qr.isDark(row, col)) {
+            ctx.fillRect((col + quietZone) * cell, (row + quietZone) * cell, cell, cell);
+          }
         }
       }
       return canvas;
     } catch {
-      return el('div', 'qr-fallback', 'QR unavailable');
+      return el('div', 'qr-fallback', 'QR unavailable — use Copy or Share');
     }
   }
 

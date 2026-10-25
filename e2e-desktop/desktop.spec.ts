@@ -134,6 +134,8 @@ test('two desktop instances pair, verify and transfer a real file', async () => 
   await (await import('node:fs/promises')).writeFile(filePath, payload);
 
   await a.page.getByTestId('file-input').setInputFiles(filePath);
+  await expect(a.page.getByTestId('edge-send-card')).toBeVisible();
+  await a.page.getByTestId('send-staged').click();
   await expect(b.page.getByTestId('incoming-modal')).toBeVisible({ timeout: 60_000 });
   await b.page.getByTestId('accept-transfer').click();
 

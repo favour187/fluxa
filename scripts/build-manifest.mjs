@@ -10,10 +10,11 @@
  * Usage:
  *   node scripts/build-manifest.mjs                    # scan default locations
  *   node scripts/build-manifest.mjs --out docs-out     # choose output directory
- *   node scripts/build-manifest.mjs --platform android # tag the manifest
+ *   node scripts/build-manifest.mjs --platform android # scan release Android outputs
  *   node scripts/build-manifest.mjs --include path ... # add extra files
+ *   node scripts/build-manifest.mjs --platform linux --require-artifacts # CI: fail on empty
  *
- * Exit codes: 0 ok (manifest written, even when empty), 1 on usage/IO error.
+ * Exit codes: 0 ok (empty allowed unless --require-artifacts), 1 on usage/IO error.
  */
 
 import { createHash } from 'node:crypto';
@@ -26,29 +27,35 @@ import { fileURLToPath } from 'node:url';
 // pathname would come back as "/C:/..." and every fs call would fail.
 const REPO_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 
-/** Directories that electron-builder / Gradle write into. */
-const DEFAULT_SCAN_DIRS = [
-  'release',
-  'artifacts/web',
-  'android/app/build/outputs/apk/release',
-  'android/app/build/outputs/bundle/release',
-  'android/app/build/outputs/apk/debug',
-];
+/** CI builds each platform into a separate directory; never attest another job's outputs. */
+const PLATFORM_SCAN_DIRS = {
+  linux: ['dist-linux', 'release'],
+  windows: ['dist-windows', 'release'],
+  'macos-unsigned': ['dist-macos', 'release'],
+  macos: ['dist-macos', 'release'],
+  web: ['artifacts/web'],
+  android: [
+    'android/app/build/outputs/apk/release',
+    'android/app/build/outputs/bundle/release',
+  ],
+};
+const DEFAULT_SCAN_DIRS = [...new Set(Object.values(PLATFORM_SCAN_DIRS).flat()), 'android/app/build/outputs/apk/debug'];
 
 /** Files that are build by-products, not deliverables. */
 const IGNORED =
   /(\.blockmap|\.map|\.ya?ml|\.icns|\.png|\.ico|output-metadata\.json|builder-.*\.yml|\.d\.ts)$/i;
 
 function parseArgs(argv) {
-  const opts = { out: 'artifacts/manifest', platform: null, include: [], quiet: false };
+  const opts = { out: 'artifacts/manifest', platform: null, include: [], quiet: false, requireArtifacts: false };
   for (let i = 0; i < argv.length; i += 1) {
     const arg = argv[i];
     if (arg === '--out') opts.out = argv[++i];
     else if (arg === '--platform') opts.platform = argv[++i];
     else if (arg === '--include') opts.include.push(argv[++i]);
     else if (arg === '--quiet') opts.quiet = true;
+    else if (arg === '--require-artifacts') opts.requireArtifacts = true;
     else if (arg === '--help' || arg === '-h') {
-      console.log('usage: node scripts/build-manifest.mjs [--out DIR] [--platform NAME] [--include FILE ...]');
+      console.log('usage: node scripts/build-manifest.mjs [--out DIR] [--platform NAME] [--include FILE ...] [--require-artifacts]');
       process.exit(0);
     } else {
       throw new Error(`unknown argument: ${arg}`);
@@ -202,8 +209,12 @@ async function main() {
     // Android project not generated: fine on web-only builds.
   }
 
+  const platformDirs = opts.platform && opts.platform !== 'all'
+    ? PLATFORM_SCAN_DIRS[opts.platform]
+    : DEFAULT_SCAN_DIRS;
+  if (!platformDirs) throw new Error(`unsupported platform: ${opts.platform}`);
   const found = [];
-  for (const dir of DEFAULT_SCAN_DIRS) await collect(join(REPO_ROOT, dir), found);
+  for (const dir of platformDirs) await collect(join(REPO_ROOT, dir), found);
   for (const extra of opts.include) found.push(resolve(REPO_ROOT, extra));
 
   const unique = [...new Set(found)].filter((f) => !IGNORED.test(basename(f)));
@@ -216,6 +227,9 @@ async function main() {
     }
   }
   artifacts.sort((a, b) => a.name.localeCompare(b.name));
+  if (opts.requireArtifacts && artifacts.length === 0) {
+    throw new Error(`no ${opts.platform ?? 'build'} artifacts found in ${platformDirs.join(', ')}`);
+  }
 
   const manifest = {
     product: pkg.build?.productName ?? pkg.name,

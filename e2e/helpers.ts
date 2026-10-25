@@ -92,9 +92,16 @@ export async function sha256OfFile(path: string): Promise<string> {
   return hash.digest('hex');
 }
 
+/** File selection stages a send; the user must explicitly swipe or press Send now. */
+export async function stageAndSend(sender: Page, files: FileSpec[] | string | string[]): Promise<void> {
+  await sender.getByTestId('file-input').setInputFiles(files);
+  await expect(sender.getByTestId('edge-send-card')).toBeVisible();
+  await sender.getByTestId('send-staged').click();
+}
+
 /** Sends files through the real file input and accepts them on the receiver. */
 export async function sendAndAccept(sender: Page, receiver: Page, files: FileSpec[]): Promise<void> {
-  await sender.getByTestId('file-input').setInputFiles(files);
+  await stageAndSend(sender, files);
   await expect(receiver.getByTestId('incoming-modal')).toBeVisible({ timeout: 30_000 });
   await receiver.getByTestId('accept-transfer').click();
 }

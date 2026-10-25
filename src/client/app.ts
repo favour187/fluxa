@@ -177,6 +177,7 @@ export class FluxaApp {
   private pendingShares = new Map<string, ReceivedShare>();
   private receivedShares: ReceivedShare[] = [];
   private messages: ChatEntry[] = [];
+  private chatTimers = new Map<string, number>();
   private pendingPairing: PairingView | null = null;
   private incoming: { task: ReceiveTask } | null = null;
   private toasts: Toast[] = [];
@@ -559,16 +560,29 @@ export class FluxaApp {
         onControl: (msg) => {
           if (msg.t === 'chat') {
             const activeEntry = box.entry;
-            const active = Boolean(activeEntry?.session.verified && activeEntry.session.state === 'connected');
-            if (!active) {
-              box.entry?.session.sendControl({ t: 'chatAck', id: msg.id, ok: false, reason: 'Device is not verified' });
+            if (!activeEntry?.session.verified || activeEntry.session.state !== 'connected') {
+              try { activeEntry?.session.sendControl({ t: 'chatAck', id: msg.id, ok: false, reason: 'Device is not verified' }); } catch { /* disconnected */ }
               return;
             }
-            if (!this.messages.some((item) => item.id === msg.id && item.deviceId === peer.deviceId)) this.messages = [...this.messages, { id: msg.id, deviceId: peer.deviceId, peerName: peer.name, direction: 'received', text: msg.text, sentAt: msg.sentAt, status: 'received' }].slice(-100);
-            box.entry?.session.sendControl({ t: 'chatAck', id: msg.id, ok: true, receivedAt: Date.now() });
-            this.emit();
+            if (!this.messages.some((item) => item.id === msg.id && item.deviceId === peer.deviceId)) {
+              const received: ChatEntry = {
+                id: msg.id, deviceId: peer.deviceId, peerName: peer.name,
+                direction: 'received', text: msg.text, sentAt: msg.sentAt, status: 'received',
+              };
+              this.messages = [...this.messages, received].slice(-100);
+              this.emit();
+            }
+            // A retransmitted message is acknowledged again but never shown twice.
+            try { activeEntry.session.sendControl({ t: 'chatAck', id: msg.id, ok: true, receivedAt: Date.now() }); } catch { /* disconnected */ }
           } else if (msg.t === 'chatAck') {
-            this.messages = this.messages.map((item) => item.id === msg.id && item.deviceId === peer.deviceId ? { ...item, status: msg.ok ? 'delivered' : 'failed' } : item);
+            if (!this.messages.some((item) => item.id === msg.id && item.deviceId === peer.deviceId && item.direction === 'sent' && item.status === 'sending')) return;
+            clearTimeout(this.chatTimers.get(msg.id));
+            this.chatTimers.delete(msg.id);
+            this.messages = this.messages.map((item): ChatEntry =>
+              item.id === msg.id && item.deviceId === peer.deviceId
+                ? { ...item, status: msg.ok ? 'delivered' : 'failed' }
+                : item,
+            );
             if (!msg.ok) this.toast('error', msg.reason ?? 'Message was not delivered');
             this.emit();
           } else if (msg.t === 'share' || msg.t === 'shareResult') box.entry?.shares?.handle(msg);
@@ -647,6 +661,16 @@ export class FluxaApp {
   private onSessionClosed(deviceId: string, reason: string): void {
     const entry = this.sessions.get(deviceId);
     if (!entry) return;
+    for (const item of this.messages) {
+      if (item.deviceId !== deviceId || item.direction !== 'sent' || item.status !== 'sending') continue;
+      clearTimeout(this.chatTimers.get(item.id));
+      this.chatTimers.delete(item.id);
+    }
+    this.messages = this.messages.map((item): ChatEntry =>
+      item.deviceId === deviceId && item.direction === 'sent' && item.status === 'sending'
+        ? { ...item, status: 'failed' }
+        : item,
+    );
     entry.manager?.handleSessionClosed(reason);
     entry.shares?.close();
     for (const [id, item] of this.pendingShares) {
@@ -1028,15 +1052,39 @@ export class FluxaApp {
     this.emit();
   }
 
-  sendChatMessage(deviceId: string, text: string): void {
+  sendChatMessage(deviceId: string, text: string): boolean {
     const clean = text.trim();
-    if (!clean || clean.length > 4000) { this.toast('error', 'Messages must be between 1 and 4,000 characters'); return; }
+    // Control frames are limited to 4,000 UTF-8 bytes, not 4,000 JS code units.
+    if (!clean || new TextEncoder().encode(clean).byteLength > 4000) {
+      this.toast('error', 'Messages must be between 1 and 4,000 UTF-8 bytes');
+      return false;
+    }
     const entry = this.sessions.get(deviceId);
-    if (!entry?.session.verified || entry.session.state !== 'connected') { this.toast('error', 'Verify a connected device before messaging'); return; }
-    const id = toHex(randomBytes(16)), sentAt = Date.now();
-    this.messages = [...this.messages, { id, deviceId, peerName: entry.link.name, direction: 'sent', text: clean, sentAt, status: 'sending' }].slice(-100);
-    entry.session.sendControl({ t: 'chat', id, text: clean, sentAt });
+    if (!entry?.session.verified || entry.session.state !== 'connected') {
+      this.toast('error', 'Verify a connected device before messaging');
+      return false;
+    }
+    const id = toHex(randomBytes(16));
+    const sentAt = Date.now();
+    const sent: ChatEntry = { id, deviceId, peerName: entry.link.name, direction: 'sent', text: clean, sentAt, status: 'sending' };
+    this.messages = [...this.messages, sent].slice(-100);
+    try {
+      entry.session.sendControl({ t: 'chat', id, text: clean, sentAt });
+      this.chatTimers.set(id, window.setTimeout(() => {
+        this.chatTimers.delete(id);
+        if (!this.messages.some((item) => item.id === id && item.status === 'sending')) return;
+        this.messages = this.messages.map((item): ChatEntry => item.id === id ? { ...item, status: 'failed' } : item);
+        this.toast('error', 'Message delivery timed out');
+        this.emit();
+      }, 30_000));
+    } catch (err) {
+      this.messages = this.messages.map((item): ChatEntry => item.id === id ? { ...item, status: 'failed' } : item);
+      this.toast('error', `Message could not be sent: ${(err as Error).message}`);
+      this.emit();
+      return false;
+    }
     this.emit();
+    return true;
   }
 
   sendSharedContent(deviceId: string, kind: SharedContent['kind'], text: string, url?: string, title?: string): void {
