@@ -17,6 +17,8 @@ export interface DesktopInfo {
   platform: string;
   arch: string;
   localUrl: string;
+  /** Private-LAN endpoints usable by other devices, only when the server binds LAN. */
+  lanUrls: string[];
   serverPort: number | null;
   signalUrl: string | null;
   isPackaged: boolean;
@@ -29,7 +31,13 @@ export interface DesktopBridge {
   setIdentity(identity: { deviceId: string; name: string; platform: string }): Promise<{ ok: boolean }>;
   nearby(): Promise<NearbyPeer[]>;
   onNearby(callback: (peers: NearbyPeer[]) => void): () => void;
+  /** A URL protocol invocation only prepares a draft; never sends it. */
+  onHandoff(callback: (draft: { url: string; title: string }) => void): () => void;
   notify(title: string, body: string): Promise<{ ok: boolean }>;
+  /** Native clipboard access is gated by an explicit foreground sync session. */
+  clipboardConsent(enabled: boolean): Promise<{ ok: boolean; error?: string }>;
+  clipboardRead(): Promise<{ ok: boolean; text?: string; error?: string }>;
+  clipboardWrite(text: string): Promise<{ ok: boolean; error?: string }>;
   saveDialog(name: string): Promise<{ canceled: boolean; filePath: string | null }>;
   beginSave(filePath: string, size: number): Promise<{ ok: boolean; token?: string; error?: string }>;
   writeSave(token: string, offset: number, bytes: Uint8Array): Promise<{ ok: boolean; bytes?: number; error?: string }>;

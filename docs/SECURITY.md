@@ -13,6 +13,9 @@ here is aspirational.
 | Device private key | IndexedDB as a non-extractable `CryptoKey` | Not exportable by JavaScript; same-origin only |
 | Pairing codes | Server memory only | Random, 2-minute TTL, single use, rate limited |
 | Trust list | IndexedDB per browser profile | Local only; no account, no sync |
+| Live clipboard text | OS clipboard and ephemeral verified peer channel | Two-party opt-in, 16 KiB plain-text cap, no signalling/history persistence; **do not copy passwords while enabled** |
+| Screen video | OS-selected capture and WebRTC DTLS-SRTP | Separate peer approval, no recording/audio/remote control; ends on stop/disconnect |
+| Transfer rules | Local browser storage per pinned device id | Default Ask; optional bounded allowlist auto-accept into private storage only |
 
 ## Identity and pairing
 
@@ -62,7 +65,10 @@ compare it out of band and must both confirm before any file bytes are accepted.
 ## Transport
 
 * WebRTC DataChannels are encrypted with DTLS between peers. In a direct
-  connection no third party carries the bytes.
+  connection no third party carries the bytes. After two-sided screen consent,
+  a media transceiver uses encrypted DTLS-SRTP on that same peer connection;
+  its offer/answer travels inside the verified DataChannel and must retain the
+  certificate fingerprint that was bound to the SAS.
 * When a TURN relay is configured, TURN forwards **DTLS-encrypted** packets: the
   relay can observe traffic volume and IP addresses/timing metadata but not file
   contents. This is why Fluxa can describe the data path as end-to-end encrypted in
@@ -75,7 +81,8 @@ compare it out of band and must both confirm before any file bytes are accepted.
 
 * Strict Content-Security-Policy (`default-src 'self'`, no inline scripts, no
   third-party origins), `X-Content-Type-Options: nosniff`, `Referrer-Policy:
-  no-referrer`, `Permissions-Policy` disabling camera/microphone/geolocation,
+  no-referrer`, `Permissions-Policy` permitting **same-origin camera only** for
+  user-triggered QR scanning while disabling microphone/geolocation, and
   `Cross-Origin-Opener-Policy: same-origin`.
 * Path traversal is blocked in two places: `sanitizeRelPath` on every manifest entry
   and the static-file server's resolved-path check.
@@ -106,6 +113,8 @@ compare it out of band and must both confirm before any file bytes are accepted.
 | Malicious peer flooding with frames | Frame size caps, bounded queues, timeouts, disconnect |
 | Partial file presented as complete | Per-file digest, receiver-side durable `doneAck`, verified source/prefix on restart (protocol v2) |
 | Unauthorised TURN bandwidth use | Separate enrolment key required for expiring REST credentials over WSS; key rotation, reverse-proxy limits and coturn quotas remain operator responsibilities |
+| Accidental automated file acceptance | Default Ask; opt-in rule limited to SAS-verified peer, allowlisted extensions and 1–100 MiB batch with durable private storage; never auto-open or auto-export |
+| Remote screen/clipboard request before consent | Control messages ignored outside a verified session and separately accepted share/sync state; either side can stop. No initial clipboard text sent |
 
 **Not mitigated (documented gaps)**
 
@@ -129,12 +138,13 @@ compare it out of band and must both confirm before any file bytes are accepted.
 8. **Malicious file *content*.** Fluxa verifies integrity, not safety: a transferred
    executable is still an executable. The UI labels installers as files and never
    runs them.
-9. **Clipboard text is shared only when the sender deliberately pastes/enters it
-   (or explicitly presses a permission-gated Paste button), and the recipient
-   approves the item.** Copy/Open remains a separate action. Fluxa never
-   monitors the clipboard, silently opens links, or moves cookies, passwords,
-   authentication sessions or browser tabs. A person can still *choose* to paste
-   a secret; both UI and docs warn against it.
+9. **Live clipboard sync deliberately monitors subsequent text changes after
+   both verified devices opt in.** It does not copy the initial clipboard or
+   persist it, but **there is no reliable password/secret detector**: copying a
+   password, OTP or token while enabled can send it to the other device. Keep
+   sync off when handling secrets, stop it from either device, and use the
+   per-item approval flow for individual shares. OS paste/privacy prompts and
+   background suspension vary by platform.
 10. **TURN enrolment is a shared operator key, not per-user authorisation.**
    Someone with that key may consume relay bandwidth. Store it on trusted
    devices, rotate if leaked, and set quotas/limits on the relay/proxy.
@@ -142,6 +152,18 @@ compare it out of band and must both confirm before any file bytes are accepted.
    and can be evicted separately from IDB. Recovery re-reads actual OPFS bytes;
    it never trusts a journal offset alone. A lost source/evicted partial requires
    a new transfer rather than an invented completion.
+12. **Tab handoff is not account/session migration.** The extension requests only
+   `activeTab` and `storage`, then passes an explicitly selected URL/title for
+   local review. It never accesses cookies, passwords, tab history or third-party
+   app storage. URLs *can* themselves contain sensitive query/hash tokens; the
+   sender must inspect the full link before sending. The destination signs in
+   separately, approves receipt, and chooses when to open it. No Fluxa account
+   server exists; paired keys are the device authentication method.
+13. **Automation is scoped, not a background service.** A verified device may
+   have an opt-in private-storage auto-accept rule. File extensions are only
+   filters, not malware checks; received files must still be treated as untrusted.
+   Browser and mobile OS background work may be suspended. Desktop app screen
+   picker/custom URI handler require physical OS/browser validation.
 
 ## Reporting
 

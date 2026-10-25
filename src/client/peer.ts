@@ -29,7 +29,7 @@ import {
   buildSasTranscript,
   exportPublicKeySpki,
 } from '../shared/crypto.js';
-import { decodeFrame, encodeChunk, encodeControl, PROTOCOL_VERSION, type ControlMessage } from '../shared/protocol.js';
+import { decodeFrame, encodeChunk, encodeControl, PROTOCOL_VERSION, type ControlMessage, type ScreenSignal } from '../shared/protocol.js';
 import type { Identity } from './identity.js';
 import type { PeerLink } from './signal.js';
 import type { Relay } from './direct.js';
@@ -48,6 +48,8 @@ export interface PeerEvents {
   onControl: (msg: ControlMessage) => void;
   onChunk: (streamId: number, offset: number, data: Uint8Array) => void;
   onVerified: () => void;
+  /** Media is shown only after a verified peer's separate screen consent. */
+  onScreenTrack: (stream: MediaStream) => void;
   onClosed: (reason: string) => void;
 }
 
@@ -75,6 +77,12 @@ export class PeerSession {
   verified = false;
   pc: RTCPeerConnection;
   channel: RTCDataChannel | null = null;
+  remoteScreenStream: MediaStream | null = null;
+  private screenSender: RTCRtpSender | null = null;
+  /** A sender can be reused only after its initial media offer was answered. */
+  private screenNegotiated = false;
+  private screenGeneration = 0;
+  private screenBusy = false;
 
   private readonly identity: Identity;
   /**
@@ -126,6 +134,16 @@ export class PeerSession {
       else if (s === 'connected' && this.state === 'connecting') this.events.onState('handshaking');
     };
     this.pc.ondatachannel = (e) => this.attachChannel(e.channel);
+    this.pc.ontrack = (event) => {
+      if (!this.verified || event.track.kind !== 'video') {
+        event.track.stop(); // never surface unverified or unexpected media
+        return;
+      }
+      // Store the transceiver's track for repeat screen sessions: replaceTrack
+      // on an existing sender does not fire another ontrack event on the viewer.
+      this.remoteScreenStream = new MediaStream([event.track]);
+      this.events.onScreenTrack(this.remoteScreenStream);
+    };
   }
 
   /**
@@ -388,6 +406,115 @@ export class PeerSession {
     this.pingTimer = window.setInterval(() => {
       this.sendControl({ t: 'ping', ts: Date.now() });
     }, PING_INTERVAL_MS);
+  }
+
+  /* ---------------------------------------------------------------- */
+  /* Consent-based screen sharing (SDP over the already verified channel) */
+  /* ---------------------------------------------------------------- */
+
+  async sendScreenTrack(track: MediaStreamTrack, id: string): Promise<void> {
+    if (!this.verified || this.state !== 'connected' || track.kind !== 'video' || track.readyState !== 'live') {
+      throw new Error('A verified connection and a live screen capture are required');
+    }
+    const generation = this.screenGeneration;
+    if (this.screenSender && this.screenNegotiated) {
+      const sender = this.screenSender;
+      await sender.replaceTrack(track);
+      if (generation !== this.screenGeneration || track.readyState !== 'live') {
+        await sender.replaceTrack(null).catch(() => {});
+        throw new Error('Screen capture ended during negotiation');
+      }
+      return; // already negotiated: replaceTrack does not need another offer
+    }
+    if (this.screenBusy || this.screenSender || this.pc.signalingState !== 'stable') {
+      throw new Error('A screen negotiation is already in progress');
+    }
+    const sender = this.pc.addTrack(track, new MediaStream([track]));
+    this.screenSender = sender;
+    this.screenNegotiated = false;
+    this.screenBusy = true;
+    const stillActive = () => generation === this.screenGeneration &&
+      this.screenSender === sender && track.readyState === 'live' && this.verified && this.state === 'connected';
+    try {
+      const offer = await this.pc.createOffer();
+      if (!stillActive()) throw new Error('Screen capture ended during negotiation');
+      await this.pc.setLocalDescription(offer);
+      if (!stillActive()) throw new Error('Screen capture ended during negotiation');
+      const sdp = this.pc.localDescription?.sdp;
+      if (!sdp) throw new Error('Could not negotiate screen media');
+      this.sendControl({ t: 'screenSignal', id, action: 'offer', sdp });
+    } catch (err) {
+      // An unanswered offer is not a reusable transceiver. Roll it back,
+      // including if stop() won the race while createOffer was pending.
+      try {
+        const hasLocalOffer = () => this.pc.signalingState === 'have-local-offer';
+        if ((this.screenSender === sender || this.screenSender === null) && hasLocalOffer()) {
+          await this.pc.setLocalDescription({ type: 'rollback' });
+        }
+      } catch { /* a racing answer or closed connection may already resolve it */ }
+      try { this.pc.removeTrack(sender); } catch { /* connection closed */ }
+      if (this.screenSender === sender) this.screenSender = null;
+      throw err;
+    } finally {
+      this.screenBusy = false;
+    }
+  }
+
+  async handleScreenSignal(msg: ScreenSignal): Promise<void> {
+    if (!this.verified || this.state !== 'connected' || !this.remoteHello) throw new Error('Screen media requires a verified session');
+    // A renegotiation must keep the same DTLS certificate bound to the SAS.
+    if (fingerprintFromSdp(msg.sdp) !== this.remoteHello.dtls) {
+      throw new Error('Screen media DTLS fingerprint changed');
+    }
+    if (msg.action === 'offer') {
+      if (this.pc.signalingState !== 'stable') throw new Error('Screen negotiation collision');
+      const generation = this.screenGeneration;
+      const offerStillPending = () => this.pc.signalingState === 'have-remote-offer';
+      const cancelIfStopped = async () => {
+        if (generation === this.screenGeneration) return false;
+        if (offerStillPending() && this.pc.pendingRemoteDescription?.sdp === msg.sdp) {
+          try { await this.pc.setRemoteDescription({ type: 'rollback' }); } catch { /* another stop already rolled it back */ }
+        }
+        return true;
+      };
+      await this.pc.setRemoteDescription({ type: 'offer', sdp: msg.sdp });
+      if (await cancelIfStopped()) return;
+      const answer = await this.pc.createAnswer();
+      // Stopping on the viewer may have rolled back this unfinished offer.
+      if (await cancelIfStopped() || !offerStillPending()) return;
+      await this.pc.setLocalDescription(answer);
+      const response = this.pc.localDescription?.sdp;
+      if (!response) throw new Error('Could not answer screen offer');
+      this.sendControl({ t: 'screenSignal', id: msg.id, action: 'answer', sdp: response });
+    } else {
+      if (this.pc.signalingState !== 'have-local-offer') throw new Error('Unexpected screen answer');
+      await this.pc.setRemoteDescription({ type: 'answer', sdp: msg.sdp });
+      if (this.screenSender?.track?.readyState === 'live') this.screenNegotiated = true;
+    }
+  }
+
+  async stopScreenTrack(): Promise<void> {
+    this.screenGeneration++;
+    const sender = this.screenSender;
+    if (!sender) {
+      // The viewer might have applied an offer but not answered yet. Leaving
+      // that pending would collide with the next explicit screen session.
+      try {
+        if (this.pc.signalingState === 'have-remote-offer') await this.pc.setRemoteDescription({ type: 'rollback' });
+      } catch { /* an answer/close may have raced with cancellation */ }
+      return;
+    }
+    if (!this.screenNegotiated) {
+      // If the user stops before the first answer, the transceiver cannot be
+      // reused with replaceTrack: its media section may never have negotiated.
+      this.screenSender = null;
+      try { this.pc.removeTrack(sender); } catch { /* disconnected */ }
+      try {
+        if (this.pc.signalingState === 'have-local-offer') await this.pc.setLocalDescription({ type: 'rollback' });
+      } catch { /* a racing answer or closed connection already resolved it */ }
+      return;
+    }
+    try { await sender.replaceTrack(null); } catch { /* disconnected */ }
   }
 
   /* ---------------------------------------------------------------- */

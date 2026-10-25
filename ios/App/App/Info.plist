@@ -25,6 +25,8 @@
 	<!-- iOS 17 WebKit supports the WebCrypto/OPFS APIs used by the shared client. -->
 	<key>NSLocalNetworkUsageDescription</key>
 	<string>Fluxa connects to a device you explicitly pair with on your local network to transfer files.</string>
+	<key>NSCameraUsageDescription</key>
+	<string>Fluxa uses your camera only when you tap Scan QR to pair with another device.</string>
 	<key>NSAppTransportSecurity</key>
 	<dict><key>NSAllowsLocalNetworking</key><true/></dict>
 	<key>UIFileSharingEnabled</key>

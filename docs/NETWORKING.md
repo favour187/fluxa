@@ -24,6 +24,28 @@ run an mDNS broker; the desktop shell advertises `_fluxa._tcp` for convenience.
 An mDNS sighting never bypasses SAS verification. Android/iOS require a reachable
 separate broker or a serverless direct code: they do not run one themselves.
 
+### Phone-reachable QR pairing
+
+The desktop renderer uses `127.0.0.1` to talk to its embedded server, but a
+phone **cannot** use that address to reach the desktop. When the embedded
+broker is actually bound on the private LAN, Fluxa shows candidate Wi-Fi/LAN
+addresses in Settings and generates an installed-app `fluxa://pair` QR carrying
+one of those addresses plus a single-use code. The QR never contains TURN or
+account credentials. On the receiving app, accepting a different endpoint
+requires a confirmation; the claim is held until that server completes signed
+WebSocket authentication. Both devices must still compare the SAS. If the
+desktop fell back to a loopback-only broker (e.g. its LAN port was occupied),
+Fluxa suppresses a misleading cross-device QR and offers the short code with
+an explicitly shared broker or Direct code instead. Check the actual Wi-Fi
+adapter, firewall and local-network permissions on real hardware.
+
+**Secure context:** packaged Android/iOS WebViews use local secure app origins.
+Opening a bare `http://192.168.x.y` URL in a regular phone browser may fail
+WebCrypto/camera permissions even when the HTTP server is reachable; prefer an
+installed app or a trusted HTTPS deployment. Plain private-LAN WS exposes
+signalling metadata to people on that LAN: the SAS and DTLS protect peer
+identity/bytes, not the metadata. Public brokers require WSS and proper TLS.
+
 ## Configure the signalling server
 
 Run `npm ci && npm run build && PORT=8787 HOST=127.0.0.1 npm start`. On a local

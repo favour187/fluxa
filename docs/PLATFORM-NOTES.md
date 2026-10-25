@@ -1,60 +1,28 @@
 # Platform status and restrictions
 
-The app has **one TypeScript/WebRTC transfer implementation**, reused by web,
-Electron, Android WebView and iOS WKWebView. Source sharing is not equivalent to
-having built/signed/tested every target. The latest dated verification results
-are in [TEST-REPORT.md](TEST-REPORT.md).
+One TypeScript/WebRTC engine serves web, Electron, Android WebView and iOS WKWebView. **Shared source and Capacitor sync do not prove an installed app works.** The latest dated results are in [TEST-REPORT.md](TEST-REPORT.md); the signed Android artifact correction below distinguishes commits.
 
-| Platform | Source | Local build | Real-device run | Distribution |
-| --- | --- | --- | --- | --- |
-| Chromium browser on Linux | Present | Yes | Two local headless contexts (including restart/resume) | Web app; PWA depends on a secure deployment |
-| Linux desktop | Electron source | E2E launched Linux Electron; local AppImage/deb built, packaged-unpacked binary smoke-tested | No external LAN/physical device or installer run | Unsigned AppImage/deb; no distro signing |
-| Windows desktop | Electron source | Windows CI **baseline** built NSIS/portable, not this unpushed diff | No Windows machine test of this diff | Needs platform test; no Authenticode credential |
-| macOS desktop | Electron source | New unsigned x64 `.app` ZIP cross-built on Linux; Mac job gated on a Mac executor | No macOS machine test of this diff | Needs real Mac build, Apple Developer ID + notarisation for normal distribution |
-| Android | Capacitor project + plugins | Local `assembleRelease bundleRelease` passed; local release outputs **unsigned** and debug APK debug-signed. Previous upstream CircleCI job 173 produced a **release-key signed** APK (v1/v2 independently verified) and AAB, for *earlier source* | No Android phone/emulator test of this change | Existing CI key is not available locally; this revision needs its own signed CI build and physical Android check |
-| iOS/iPadOS | Xcode/Capacitor project, iOS 17 deployment target | `cap sync ios` copied assets/plugins on Linux; pods/Xcode **not** run | No simulator or iPhone test | Needs Mac/Xcode, a developer team and signing/provisioning for an IPA |
+| Target | Local evidence for this combined feature tree (2026-10-25) | Still required |
+| --- | --- | --- |
+| Chromium browser on Linux | TypeScript, 93 Node/extension tests and **33 Chromium E2E** passed after the final camera-policy and screen-negotiation-race fixes. QR camera and display capture are **simulated streams**, but decoding/WebRTC media and peer verification are real in tests | Real phone, same-Wi-Fi, network permission and other browsers |
+| Linux Electron | Six real Electron-process E2E passed for this tree: bridge consent, handoff receiver, simulated screen-picker cancellation, two-instance transfer, mDNS, profile restart | Fresh packaged-app distribution/runtime, real OS screen picker/protocol dispatch and physical LAN |
+| Windows/macOS | Electron source and build config | Build and runtime tests of **this** commit; Authenticode/Developer ID/notarisation as appropriate |
+| Android | Android project, camera declaration and Clipboard/App/Filesystem/Share plugin registrations synced successfully on Linux | This tree has **no Android SDK APK/AAB build or phone test here**. New CircleCI build/signing and device trials |
+| iOS/iPadOS | iOS project, camera usage string, URL handler and Clipboard/App/Filesystem/Share Podfile synced on Linux | CocoaPods/Xcode compile, simulator/phone, code signing/provisioning and IPA require macOS |
+| Browser extension | Manifest V3 unpacked Chrome load, pure link-builder tests, same-origin handoff browser E2E | Real Chrome/Edge/Firefox extension popup and installed desktop external-protocol flow; browser-store signing/listing |
 
-## Browser/WebView dependencies
+**Release signing correction:** PR #3's merged commit `e310d7963d52` passed CircleCI main pipeline 32 (nine jobs), and its Android release APK **and** AAB were independently downloaded, hash-checked and verified as release-signed, not debug-signed. See the accompanying `FLUXA-PR3-MERGE-RESULTS.md` report for the independent checks. Those files do **not** contain the features in this combined feature tree. A signed binary for this tree must be produced and verified **after** it is committed/pushed and CI passes. PR #4's old branch pipeline 38 failures do not describe the combined tree.
 
-Requires WebRTC DataChannels, WebCrypto ECDSA/ECDH, IndexedDB CryptoKey storage
-and an origin-private filesystem (OPFS) for **durable** large-file recovery.
-When OPFS is missing, receive falls back to bounded in-memory storage and
-interruption **cannot** be resumed. Users must grant file/directory picker or
-clipboard access through explicit actions. Site-data clearing/OS eviction may
-remove identity keys or OPFS bytes. Always re-check SAS if the identity changes.
+## Browser and native permissions
 
-On Chromium, user-selected directory export preserves nested paths and verifies
-written bytes; browsers without `showDirectoryPicker` download files
-individually. Browser download folders are outside Fluxa's control. Neither a
-website nor an iOS WebView can silently enumerate or install apps, inspect
-another app's data, read browser cookies/tabs, or continuously monitor the
-clipboard. Link/session handoff only shares a **manually entered URL/note**;
-it does not move authentication state or open tabs automatically.
+Web browsers require secure contexts for WebCrypto, clipboard API, QR camera and display capture. `localhost` is a special local secure context; **plain HTTP to a computer's LAN IP often is not**. For phone-to-desktop pairing, use the packaged mobile app (`https://localhost` WebView origin) with a reachable private-LAN broker, or deploy HTTPS/WSS. The local desktop server exposes candidate Wi-Fi/LAN addresses, but interface selection, firewall, NAT and ICE still need real-hardware checks. Scanner JS has a bundled QR decoder fallback for browsers without `BarcodeDetector`; phone camera hardware was not tested. Android declares optional CAMERA and Capacitor can request it only when the QR scanner is opened. iOS declares `NSCameraUsageDescription`; OS permission handling remains to be checked on-device.
 
-## Native constraints
+Live clipboard sync is a **two-device opt-in session** for subsequent plain text up to 16 KiB. Browser tabs require focus, packaged mobile apps only poll while visible (iOS may prompt to paste), and an open desktop app can poll even when its window is not foregrounded. It is not a credential manager; copied secrets can leak to the other opted-in device. Manual per-item shares remain available. Screen capture uses `getDisplayMedia` and the Electron OS source picker where supported; no audio/remote control. Mobile WebView screen-source capture is not guaranteed, and an inactive app cannot keep a screen stream alive reliably.
 
-Android/iOS app origins use packaged WebViews with Capacitor Filesystem, Share
-and App plugins. Native exports use Documents + an optional OS share sheet and
-unique directories, **not** unrestricted access to the system Downloads folder
-or all Files app locations. Android's network security config enables cleartext
-for user-selected private LAN broker addresses; remote brokers need WSS.
-iOS declares local-network usage and custom `fluxa://pair` links and permits
-local ATS networking. These settings need on-device verification, including
-permission prompts, foreground/background transitions, iOS WebKit OPFS behaviour,
-link handling, Files exports and interoperability with desktops. Pairing links
-do not grant trust; both users still compare six digits.
+OPFS enables durable large-file recovery where available. Without it, transfers use bounded in-memory fallback and cannot resume after restart. Site-data clearing/eviction can remove keys, trust or partial data. Browser download fallback can flatten folders; a user-picked directory preserves paths in supporting Chromium browsers. Capacitor native exports write unique Documents directories then may offer the OS share sheet, **not** arbitrary unrestricted filesystem access.
 
-Mobile OS background suspension may stop a transfer. The restart flow is
-re-pair → verify → approve → reselect the same source(s) → compare committed
-prefix hashes. There is no background service/tray, automatic resume or
-cross-network access without a reachable broker and viable ICE/TURN.
+Transfer automation is per verified device and defaults to Ask. Optional auto-accept applies only to bounded, allowlisted file extensions into private durable storage, and never auto-opens files. Only desktop users can explicitly enable auto-accept while the window is not visible; no mobile/background service or OS-wide automation is shipped. File-picker immediate-send is an opt-in local preference and still begins with a user selecting files. Interruption recovery remains explicit: pair → verify → reselect sources → rehash committed bytes → resume when possible.
 
-Desktop Electron provides a native save dialog, bounded streaming IPC, an
-embedded LAN broker and mDNS discovery. The renderer has no Node globals and
-cannot save to an arbitrary path without a one-use dialog capability. Normal
-macOS distribution needs signing/notarisation, Windows may warn without
-Authenticode, and Linux packages are not distro-repository signed.
+The tab-handoff extension provides a reviewed URL/title, not third-party cookies or sign-in continuity. The destination must sign in to web services independently. The registered desktop `fluxa://handoff` receiver only prepares a local draft; normal OS association/browser prompts are not guaranteed on an unpacked build.
 
-**Transferring** an APK/MSI/DMG/deb is ordinary file transfer; installation,
-installer permissions and package signatures are always the operating system's
-decision. No privileged installer or full-device migration is part of Fluxa.
+**Transferring** APK/MSI/DMG/deb files is ordinary file transfer: Fluxa does not install apps, bypass OS permissions or validate third-party publisher signatures. Same-network and remote transfers still depend on viable WebRTC ICE and, when needed, user-deployed WSS/TURN; no universal offline route is claimed.

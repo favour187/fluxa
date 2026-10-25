@@ -8,6 +8,10 @@ Browser / Capacitor WKWebView / Android WebView / Electron renderer
     peer.ts       -> DTLS-bound ECDH transcript + six-digit SAS
     transfer/*    -> shared chunked sender, receiver, journal, OPFS sink, exports
     share.ts      -> optional explicitly approved text/link/work-link module
+    clipboard-sync.ts -> separate, two-party opt-in bounded text mirroring
+    screen-share.ts -> source-picked, consented media + verified-channel SDP
+    transfer/rules.ts -> per-peer allowlist, caps and private-storage automation
+    handoff-bridge.ts -> same-origin extension draft mailbox, no auto-send
     app.ts / ui.ts -> ephemeral verified-peer chat, staged file send, ripple
                          |
               verified WebRTC DataChannel
@@ -17,7 +21,10 @@ Browser / Capacitor WKWebView / Android WebView / Electron renderer
 Node broker: static UI, short pairing codes, ICE signalling, optional short-
 lived coturn REST credentials. It NEVER accepts file bytes for forwarding.
 Desktop: embedded LAN broker + mDNS/IPC-backed save dialog.
-Mobile: one shared Capacitor web bundle + native Filesystem/Share/App plugins.
+Mobile: one shared Capacitor web bundle + native Filesystem/Share/App/Clipboard plugins.
+Extension: explicit current-tab URL/title only; browser mode hands a local
+fragment to a same-origin verified app tab, desktop mode invokes a registered
+`fluxa://handoff` receiver. Both produce review drafts, not automatic sends.
 ```
 
 ## What is authenticated

@@ -1,0 +1,23 @@
+{
+  "manifest_version": 3,
+  "name": "Fluxa Tab Handoff",
+  "short_name": "Fluxa Handoff",
+  "version": "0.2.0",
+  "description": "Send the current tab's link to a verified device through Fluxa, with approval on both sides. No cookies or passwords.",
+  "permissions": ["activeTab", "storage"],
+  "action": {
+    "default_title": "Review current tab in Fluxa",
+    "default_popup": "popup.html"
+  },
+  "icons": {
+    "16": "icons/16.png",
+    "48": "icons/48.png",
+    "128": "icons/128.png"
+  },
+  "browser_specific_settings": {
+    "gecko": {
+      "id": "fluxa-handoff@users.noreply.github.com",
+      "strict_min_version": "109.0"
+    }
+  }
+}

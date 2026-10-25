@@ -1,6 +1,6 @@
 # Build and release guide — Fluxa 0.2.0 / transfer protocol 2
 
-This guide describes reproducible builds. A **signed upstream Android CI APK exists** (job 173 on old commit `e58c3ff`); it does **not** establish a signed build of this revision, real-device tests, App Store/Play uploads or production TURN. Run
+This guide describes reproducible builds. **For the combined PR #4 + feature tree, only web/source builds, Android/iOS asset/plugin syncs and Linux Electron E2E have run locally. New Android/desktop installer builds and target OS tests are outstanding.** Earlier PR #3 main pipeline 32 for `e310d79` produced genuinely release-signed APK/AAB files; old job 173 did too. Neither establishes signed output of this revision, real-device tests, store publication or production TURN. Run
 `node scripts/sync-version.mjs --check` before every package build. Updates from
 protocol v1 must update both peers and the signalling broker together; old
 direct tickets and incomplete v1 journals cannot be reinterpreted as verified
@@ -20,10 +20,12 @@ node scripts/sync-version.mjs --check
 ```
 
 Browser E2E covers real DataChannels, 32 MB stream, direct code, interrupted
-restart/reselection, tampered OPFS partial, sharing consent, cancellation and
-history. Desktop E2E covers two local Electron instances and a real native
-save-dialog IPC write (including no overwrite); it does not prove Windows or
-macOS compatibility. See [TEST-REPORT.md](TEST-REPORT.md) for actual dated runs.
+restart/reselection, tampered OPFS partial, QR/camera mocks, screen media and
+clipboard mocks, reviewed extension handoff, rules, sharing consent,
+cancellation and history. Desktop E2E covers Linux Electron instances,
+clipboard/protocol bridges and a real native save-dialog IPC write (including
+no overwrite); it does not prove Windows or macOS compatibility. See
+[TEST-REPORT.md](TEST-REPORT.md) for actual dated runs.
 
 ## Web and Linux desktop
 
@@ -33,9 +35,10 @@ npm run dist:linux      # unsigned AppImage and deb in release/
 ```
 
 A web ZIP is made by the `build-web` CI job. Linux packages need `electron-builder`
-and, for GUI smoke tests, Xvfb + GTK system libraries. Local `.deb`/AppImage builds **were run** for this working tree; their hashes
-and a packaged-binary smoke test are recorded in [TEST-REPORT.md](TEST-REPORT.md).
-CI's baseline artifacts do **not** prove the unpushed changes passed CI.
+and, for GUI smoke tests, Xvfb + GTK system libraries. Local `.deb`/AppImage builds and a packaged-binary smoke test were recorded
+in the **historical baseline** of [TEST-REPORT.md](TEST-REPORT.md), **not** for
+this combined feature tree. CI's baseline artifacts do **not** prove new
+unpublished changes passed CI.
 
 ## Windows and macOS desktop
 
@@ -47,7 +50,7 @@ secrets; never add it to the repository.
 
 On a Mac, `npm run dist:mac` builds dmg/zip. The CircleCI macOS job is optional
 (`macos_runner: true`) because the current plan may not have a Mac executor.
-A Linux-produced **unsigned macOS x64 zip was built locally** (see TEST-REPORT), but is not a notarised, Mac-tested release.
+The historical baseline included a Linux-produced **unsigned macOS x64 zip** (see TEST-REPORT); the combined feature tree has no new Mac package and no notarised or Mac-tested release.
 Normal distribution requires an Apple Developer ID certificate and notarisation
 with an actual developer account; no such signing/notarisation was performed here.
 
@@ -67,8 +70,9 @@ The lower heap/one-worker override is for a **2 GiB Linux test sandbox** and
 does not skip lint or release checks. On a normal machine the project defaults
 usually suffice. Release outputs are under `android/app/build/outputs/`.
 Without locally provisioned release credentials, `assembleRelease` writes an
-**unsigned** APK/AAB: `apksigner verify` fails for the local release APK and these
-are **not installable/distributable release packages**. The Gradle debug keystore
+**unsigned** APK/AAB: `apksigner verify` fails for such a release APK and these
+are **not installable/distributable release packages**. No APK was built from
+this combined feature tree in this workspace. The Gradle debug keystore
 signs the `assembleDebug` APK, installable for **testing only** (not a Play upload
 certificate). This workspace did **not** install an APK on a device or run a
 mobile WebRTC scenario.
@@ -80,8 +84,8 @@ manifest records both as signed; independently downloaded APK hash
 `aa6a74c87e586cce85e488ce5643096cc31128e885046368c18d8919b9a32520`
 matched the manifest, and `apksigner verify --verbose --print-certs` verified
 v1 and v2 signatures from `CN=Fluxa, OU=Fluxa Releases`. This is **not** a signed
-build of the unpushed revision. After the single authorised push, inspect the
-new job's manifest and verify its own APK signature and AAB JAR signature.
+build of the new combined revision. After an authorised push/merge, inspect that
+commit's own job manifest and verify its APK signature and AAB JAR signature.
 
 Keep the existing key **outside the repository**, in CI project secrets
 `FLUXA_ANDROID_KEYSTORE_B64`, `FLUXA_ANDROID_STORE_PASSWORD`,

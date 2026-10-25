@@ -104,7 +104,9 @@ const MIME: Record<string, string> = {
 const SECURITY_HEADERS: Record<string, string> = {
   'X-Content-Type-Options': 'nosniff',
   'Referrer-Policy': 'no-referrer',
-  'Permissions-Policy': 'geolocation=(), microphone=(), camera=()',
+  // The QR scanner needs explicit, same-origin camera permission. Never grant
+  // camera access to an embedded third-party frame or enable the microphone.
+  'Permissions-Policy': 'geolocation=(), microphone=(), camera=(self)',
   'Cross-Origin-Opener-Policy': 'same-origin',
   'Content-Security-Policy': [
     "default-src 'self'",

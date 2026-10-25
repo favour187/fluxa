@@ -49,6 +49,59 @@ test.afterEach(async () => {
   }
 });
 
+test('desktop handoff is a local review draft; clipboard bridge requires explicit session consent', async () => {
+  const a = await launch(8910);
+  const before = await a.page.evaluate(() => (window as any).fluxaDesktop.clipboardRead());
+  expect(before.ok).toBe(false);
+  await a.page.bringToFront();
+  const enabled = await a.page.evaluate(() => (window as any).fluxaDesktop.clipboardConsent(true));
+  expect(enabled.ok).toBe(true);
+  const wrote = await a.page.evaluate(() => (window as any).fluxaDesktop.clipboardWrite('Fluxa native clipboard test'));
+  expect(wrote.ok).toBe(true);
+  const read = await a.page.evaluate(() => (window as any).fluxaDesktop.clipboardRead());
+  expect(read).toMatchObject({ ok: true, text: 'Fluxa native clipboard test' });
+  const refused = await a.page.evaluate(() => (window as any).fluxaDesktop.clipboardWrite('x'.repeat(16_385)));
+  expect(refused.ok).toBe(false);
+  await a.page.evaluate(() => (window as any).fluxaDesktop.clipboardConsent(false));
+  expect((await a.page.evaluate(() => (window as any).fluxaDesktop.clipboardRead())).ok).toBe(false);
+  const link = `fluxa://handoff?url=${encodeURIComponent('https://example.com/continue?part=3')}&title=${encodeURIComponent('Keep reading')}`;
+  await a.app.evaluate(({ app }, url) => {
+    app.emit('second-instance', {}, ['fluxa', url]);
+  }, link);
+  await expect(a.page.getByTestId('handoff-banner')).toContainText('Keep reading');
+  await expect(a.page.getByTestId('handoff-banner')).toContainText('Pair and verify a device first');
+  await a.page.reload();
+  expect((await a.page.evaluate(() => (window as any).fluxaDesktop.clipboardRead())).ok).toBe(false);
+});
+
+test('canceling the desktop screen picker settles the request without sharing', async () => {
+  const a = await launch(8911);
+  // Simulate a real Electron dialog cancellation, not an actual screen capture.
+  // This verifies the main-process display handler resolves its callback.
+  await a.app.evaluate(({ dialog, desktopCapturer }) => {
+    desktopCapturer.getSources = async () => [{ id: 'screen:0:0', name: 'Test screen' }] as any;
+    dialog.showMessageBox = async () => ({ response: 1, checkboxChecked: false });
+  });
+  await a.page.bringToFront();
+  await a.page.evaluate(() => {
+    const button = document.createElement('button');
+    button.dataset.testid = 'screen-picker-cancel-test';
+    button.textContent = 'Request screen picker';
+    button.addEventListener('click', () => {
+      void navigator.mediaDevices.getDisplayMedia({ video: true, audio: false })
+        .then((stream) => {
+          stream.getTracks().forEach((track) => track.stop());
+          (window as any).__screenPickerResult = 'unexpected capture';
+        })
+        .catch((error: DOMException) => { (window as any).__screenPickerResult = error.name; });
+    });
+    document.body.append(button);
+  });
+  await a.page.getByTestId('screen-picker-cancel-test').click();
+  await expect.poll(() => a.page.evaluate(() => (window as any).__screenPickerResult), { timeout: 15_000 })
+    .toMatch(/^(?:NotAllowedError|NotFoundError|AbortError)$/);
+});
+
 test('the packaged app starts, serves its UI and exposes a minimal bridge', async () => {
   const a = await launch(8901);
 
@@ -71,7 +124,8 @@ test('the packaged app starts, serves its UI and exposes a minimal bridge', asyn
   expect(sandbox.hasRequire).toBe(false);
   expect(sandbox.hasProcess).toBe(false);
   expect(sandbox.bridgeKeys).toEqual(
-    ['info', 'isDesktop', 'logLines', 'nearby', 'notify', 'onNearby', 'saveDialog', 'saveFile', 'setIdentity',
+    ['info', 'isDesktop', 'logLines', 'nearby', 'notify', 'onNearby', 'onHandoff', 'saveDialog', 'saveFile', 'setIdentity',
+      'clipboardConsent', 'clipboardRead', 'clipboardWrite',
       'beginSave', 'writeSave', 'commitSave', 'abortSave'].sort(),
   );
 

@@ -25,9 +25,10 @@ import { clearReceivedFiles, readPartial, opfsAvailable } from './transfer/sink.
 import { directoryPickerAvailable, exportToDirectory } from './transfer/export.js';
 import { Sha256, sha256OfBlob } from './sha256.js';
 import {
-  clearHistory, deletePending, getPending, listHistory, listPending, saveHistory,
+  clearHistory, deletePending, getPending, journalAvailable, listHistory, listPending, saveHistory,
   type HistoryEntry, type PendingTransfer,
 } from './transfer/journal.js';
+import { DEFAULT_RULE, decideIncoming, parseTransferRule, type TransferRule } from './transfer/rules.js';
 import { formatBytes, PROTOCOL_VERSION } from '../shared/protocol.js';
 import { isLocalNetworkHost } from '../shared/network.js';
 import { desktopBridge, hasFilePicker, type DesktopBridge, type DesktopInfo, type NearbyPeer } from './desktop.js';
@@ -43,6 +44,8 @@ import {
 import { randomBytes, randomToken, toHex } from '../shared/crypto.js';
 import { nativeAvailability, saveFileNative } from './native.js';
 import { ShareManager, type ReceivedShare } from './share.js';
+import { ClipboardSync, clipboardPort, type ClipboardView } from './clipboard-sync.js';
+import { ScreenShare, type ScreenView } from './screen-share.js';
 import type { SharedContent } from '../shared/protocol.js';
 
 export interface SessionView {
@@ -63,6 +66,8 @@ export interface PairingView {
   expiresAt: number;
   link: string | null;
 }
+
+export interface HandoffDraft { url: string; title: string }
 
 export interface TransferView {
   id: string;
@@ -108,6 +113,12 @@ export interface AppSnapshot {
   direct: DirectView | null;
   incomingShares: ReceivedShare[];
   receivedShares: ReceivedShare[];
+  /** At most one clipboard session per local OS clipboard. Nothing persists. */
+  clipboard: (ClipboardView & { peerDeviceId: string }) | null;
+  /** One live screen session per device, never recorded or persisted. */
+  screen: (ScreenView & { peerDeviceId: string }) | null;
+  /** A browser/extension link waiting for the user to review and choose a peer. */
+  handoffDraft: HandoffDraft | null;
   messages: ChatEntry[];
 }
 
@@ -132,6 +143,7 @@ type Listener = (snapshot: AppSnapshot) => void;
 
 const SIGNAL_URL_KEY = 'fluxa:signal-url';
 const TURN_ACCESS_KEY = 'fluxa:turn-access-key'; // per-origin; never copied into pairing links
+const TRANSFER_RULES_KEY = 'fluxa:transfer-rules:v1';
 
 /** Accept "host:port", "http://host:port", "ws://host/ws" and normalise to a ws URL. */
 export function normaliseSignalUrl(input: string): string | null {
@@ -176,9 +188,18 @@ export class FluxaApp {
   private history = new Map<string, HistoryEntry>();
   private pendingShares = new Map<string, ReceivedShare>();
   private receivedShares: ReceivedShare[] = [];
+  private clipboard: ClipboardSync | null = null;
+  private clipboardPeerId: string | null = null;
+  private screen: ScreenShare | null = null;
+  private screenPeerId: string | null = null;
+  private handoffDraft: HandoffDraft | null = null;
+  private transferRules = new Map<string, TransferRule>();
   private messages: ChatEntry[] = [];
   private chatTimers = new Map<string, number>();
   private pendingPairing: PairingView | null = null;
+  private wantsPairingCode = false;
+  private pendingClaim: { code: string; signalUrl: string } | null = null;
+  private pendingClaimTimer: ReturnType<typeof setTimeout> | null = null;
   private incoming: { task: ReceiveTask } | null = null;
   private toasts: Toast[] = [];
   private toastSeq = 1;
@@ -204,6 +225,16 @@ export class FluxaApp {
   async init(): Promise<void> {
     this.identity = await loadIdentity();
     this.trusted = await listTrusted();
+    try {
+      const stored: unknown = JSON.parse(localStorage.getItem(TRANSFER_RULES_KEY) ?? '{}');
+      if (stored && typeof stored === 'object' && !Array.isArray(stored)) {
+        for (const [id, value] of Object.entries(stored)) {
+          if (!this.trusted.some((device) => device.deviceId === id)) continue;
+          const rule = parseTransferRule(value);
+          if (rule) this.transferRules.set(id, rule);
+        }
+      }
+    } catch { /* private browsing: defaults remain ask, never auto-accept */ }
     // A restart cannot retain browser File objects. Show durable metadata, ask
     // the sender to reselect sources, and re-hash disk data at the receiver.
     try {
@@ -252,6 +283,7 @@ export class FluxaApp {
         this.nearby = peers;
         this.emit();
       });
+      bridge.onHandoff((draft) => this.prepareHandoff(draft.url, draft.title));
     } catch (err) {
       this.toast('error', `Desktop integration unavailable: ${(err as Error).message}`);
     }
@@ -290,6 +322,12 @@ export class FluxaApp {
       localStorage.setItem(SIGNAL_URL_KEY, url);
     } catch {
       /* storage unavailable: the setting applies for this session only */
+    }
+    if (this.signal?.currentUrl !== url) {
+      this.pendingClaim = null;
+      if (this.pendingClaimTimer) clearTimeout(this.pendingClaimTimer);
+      this.pendingClaimTimer = null;
+      this.wantsPairingCode = false;
     }
     this.signal?.setUrl(url);
     this.toast('info', `Signalling server set to ${url.replace(/^wss?:\/\//, '').replace(/\/ws$/, '')}`);
@@ -379,6 +417,9 @@ export class FluxaApp {
       direct: this.direct,
       incomingShares: [...this.pendingShares.values()],
       receivedShares: [...this.receivedShares],
+      clipboard: this.clipboard && this.clipboardPeerId ? { peerDeviceId: this.clipboardPeerId, ...this.clipboard.view } : null,
+      screen: this.screen && this.screenPeerId ? { peerDeviceId: this.screenPeerId, ...this.screen.view } : null,
+      handoffDraft: this.handoffDraft,
       messages: [...this.messages].slice(-100),
     };
   }
@@ -452,21 +493,42 @@ export class FluxaApp {
       case 'ready': {
         this.iceConfigured = (this.signal?.iceServers?.length ?? 0) > 0;
         if (event.turnRequired) this.toast('info', 'Remote relay needs a valid access key in Settings over wss://; local/direct pairing still works');
+        if (this.wantsPairingCode) {
+          this.wantsPairingCode = false;
+          this.signal?.createCode();
+        }
+        const claim = this.pendingClaim;
+        if (claim && claim.signalUrl === this.signal?.currentUrl) {
+          this.pendingClaim = null;
+          if (this.pendingClaimTimer) clearTimeout(this.pendingClaimTimer);
+          this.pendingClaimTimer = null;
+          this.signal.claimCode(claim.code);
+        }
         break;
       }
       case 'code': {
-        const fallback = this.signal?.currentUrl;
+        const endpoint = this.signal?.currentUrl;
         let link = event.link;
-        if (!link && fallback) {
+        if (endpoint) {
           try {
-            const server = new URL(fallback);
-            if (isLocalNetworkHost(server.hostname)) link = `${server.protocol === 'wss:' ? 'https:' : 'http:'}//${server.host}/?pair=${event.code}`;
-          } catch { /* manual entry still works */ }
+            const server = new URL(endpoint);
+            const local = this.desktopInfo?.localUrl.replace(/^http/, 'ws');
+            const ownServer = local && server.origin === new URL(local).origin;
+            if (ownServer) {
+              // A desktop renderer uses loopback, but a phone must dial the LAN
+              // interface. Never put 127.0.0.1 in a cross-device pairing QR.
+              const lan = this.desktopInfo?.lanUrls[0];
+              link = lan ? `fluxa://pair?code=${event.code}&server=${encodeURIComponent(lan.replace(/^http/, 'ws') + '/ws')}` : null;
+            } else if (this.native) {
+              // Installed mobile apps may use different signalling origins.
+              // Carry only the endpoint and single-use code; never credentials.
+              link = `fluxa://pair?code=${event.code}&server=${encodeURIComponent(endpoint)}`;
+            } else if (!link && isLocalNetworkHost(server.hostname)) {
+              link = `${server.protocol === 'wss:' ? 'https:' : 'http:'}//${server.host}/?pair=${event.code}`;
+            }
+          } catch { link = null; }
         }
-        this.pendingPairing = {
-          code: event.code, expiresAt: event.expiresAt,
-          link: this.native ? `fluxa://pair?code=${event.code}` : link,
-        };
+        this.pendingPairing = { code: event.code, expiresAt: event.expiresAt, link: link ?? null };
         break;
       }
       case 'codeCancelled':
@@ -558,6 +620,34 @@ export class FluxaApp {
           this.emit();
         },
         onControl: (msg) => {
+          if (msg.t === 'screenShare' || msg.t === 'screenSignal') {
+            if (msg.t === 'screenShare' && msg.action === 'request' &&
+                (this.screenPeerId !== peer.deviceId || !this.screen)) {
+              if (this.screen && !['off', 'error'].includes(this.screen.view.state)) {
+                session.sendControl({ t: 'screenShare', id: msg.id, action: 'decline', reason: 'Already sharing a screen' });
+                return;
+              }
+              this.screen?.close();
+              this.screen = this.newScreenShare(session);
+              this.screenPeerId = peer.deviceId;
+            }
+            if (this.screenPeerId === peer.deviceId) this.screen?.handle(msg);
+            return;
+          }
+          if (msg.t === 'clipboardSync' || msg.t === 'clipboardUpdate') {
+            if (msg.t === 'clipboardSync' && msg.action === 'request' &&
+                (this.clipboardPeerId !== peer.deviceId || !this.clipboard)) {
+              if (this.clipboard && !['off', 'error'].includes(this.clipboard.view.state)) {
+                session.sendControl({ t: 'clipboardSync', id: msg.id, action: 'decline', reason: 'Clipboard is syncing with another device' });
+                return;
+              }
+              this.clipboard?.close();
+              this.clipboard = this.newClipboardSync(session, peer.deviceId);
+              this.clipboardPeerId = peer.deviceId;
+            }
+            if (this.clipboardPeerId === peer.deviceId) this.clipboard?.handle(msg);
+            return;
+          }
           if (msg.t === 'chat') {
             const activeEntry = box.entry;
             if (!activeEntry?.session.verified || activeEntry.session.state !== 'connected') {
@@ -589,6 +679,9 @@ export class FluxaApp {
           else box.entry?.manager?.handleControl(msg);
         },
         onChunk: (streamId, offset, data) => box.entry?.manager?.handleChunk(streamId, offset, data),
+        onScreenTrack: (stream) => {
+          if (this.screenPeerId === peer.deviceId) this.screen?.onTrack(stream);
+        },
         onVerified: () => {
           const entry = box.entry;
           if (entry) void this.refreshConnectionPath(entry);
@@ -603,6 +696,22 @@ export class FluxaApp {
     const manager = new TransferManager(session, this.identity!.name, 64 * 1024, false, {
       onUpdate: (task) => this.onTransferUpdate(task),
       onIncoming: (task) => {
+        const decision = decideIncoming(this.transferRule(peer.deviceId), task.manifest, {
+          verified: session.verified && session.state === 'connected',
+          privateStorage: opfsAvailable() && journalAvailable(),
+          visible: document.visibilityState === 'visible',
+          desktop: Boolean(this.desktop),
+        });
+        if (decision === 'block') {
+          task.decline('Blocked by this device’s transfer rule');
+          this.toast('info', `Blocked a transfer from ${task.peerName} under your rule`);
+          return;
+        }
+        if (decision === 'auto') {
+          this.toast('info', `Auto-accepting ${task.files.length} allowed file${task.files.length === 1 ? '' : 's'} from ${task.peerName} into private storage`);
+          void task.accept();
+          return;
+        }
         this.incoming = { task };
         void this.desktop?.notify(
           `Incoming from ${task.peerName}`,
@@ -673,6 +782,16 @@ export class FluxaApp {
     );
     entry.manager?.handleSessionClosed(reason);
     entry.shares?.close();
+    if (this.clipboardPeerId === deviceId) {
+      this.clipboard?.close();
+      this.clipboard = null;
+      this.clipboardPeerId = null;
+    }
+    if (this.screenPeerId === deviceId) {
+      this.screen?.close();
+      this.screen = null;
+      this.screenPeerId = null;
+    }
     for (const [id, item] of this.pendingShares) {
       if (item.peerDeviceId === deviceId) this.pendingShares.delete(id);
     }
@@ -784,10 +903,15 @@ export class FluxaApp {
   /* ---------------------------------------------------------------- */
 
   requestPairingCode(): void {
-    this.signal?.createCode();
+    if (this.signal?.status === 'online') this.signal.createCode();
+    else {
+      this.wantsPairingCode = true;
+      this.signal?.connect();
+    }
   }
 
   cancelPairing(): void {
+    this.wantsPairingCode = false;
     this.signal?.cancelCode();
     this.pendingPairing = null;
     this.emit();
@@ -799,8 +923,59 @@ export class FluxaApp {
       this.toast('error', 'Pairing codes are 6 characters');
       return false;
     }
-    this.signal?.claimCode(cleaned);
+    if (!this.signal) {
+      this.toast('error', 'A pairing server is not configured; use Direct code instead');
+      return false;
+    }
+    if (this.signal.status === 'online') {
+      this.signal.claimCode(cleaned);
+    } else {
+      // raw() drops sends until WebSocket authentication completes. Retain just
+      // this single-use code and submit it only after the chosen server is ready.
+      this.pendingClaim = { code: cleaned, signalUrl: this.signal.currentUrl };
+      if (this.pendingClaimTimer) clearTimeout(this.pendingClaimTimer);
+      this.pendingClaimTimer = setTimeout(() => {
+        if (!this.pendingClaim || this.pendingClaim.code !== cleaned) return;
+        this.pendingClaim = null;
+        this.pendingClaimTimer = null;
+        this.toast('error', 'Could not reach the pairing server. Check the address or try Direct code.');
+      }, 20_000);
+      this.signal.connect();
+      this.toast('info', 'Connecting to the pairing server before claiming this code…');
+    }
     return true;
+  }
+
+  /** QR/deep links may contain the broker endpoint, never an access credential. */
+  joinPairingLink(raw: string): boolean {
+    let url: URL;
+    try { url = new URL(raw); } catch { return false; }
+    const nativeLink = url.protocol === 'fluxa:' && url.host === 'pair';
+    const webLink = (url.protocol === 'http:' || url.protocol === 'https:') &&
+      (url.pathname === '/' || url.pathname === '/index.html') && !url.username && !url.password;
+    if (!nativeLink && !webLink) return false;
+    const code = nativeLink ? url.searchParams.get('code') : url.searchParams.get('pair');
+    if (!code || !/^[a-z0-9]{6}$/i.test(code)) return false;
+    const endpoint = nativeLink
+      ? url.searchParams.get('server')
+      : `${url.protocol === 'https:' ? 'wss:' : 'ws:'}//${url.host}/ws`;
+    if (endpoint) {
+      const normalised = normaliseSignalUrl(endpoint);
+      if (!normalised) {
+        this.toast('error', 'The QR pairing server address is invalid');
+        return false;
+      }
+      if (normalised !== this.signal?.currentUrl) {
+        const target = new URL(normalised);
+        if (/^(?:127\.|localhost$|\[::1\]$)/i.test(target.hostname)) {
+          this.toast('error', 'That QR points to localhost on the other device. Use its LAN address or a shared server.');
+          return false;
+        }
+        if (!window.confirm(`Connect to pairing server ${target.host}? Only continue if you trust the QR source. You will still compare a verification code.`)) return false;
+        if (!this.setSignalUrl(normalised)) return false;
+      }
+    }
+    return this.joinWithCode(code);
   }
 
   /* ---------------------------------------------------------------- */
@@ -1036,6 +1211,35 @@ export class FluxaApp {
     this.emit();
   }
 
+  transferRule(deviceId: string): TransferRule {
+    const rule = this.transferRules.get(deviceId) ?? DEFAULT_RULE;
+    return { ...rule, extensions: [...rule.extensions] };
+  }
+
+  setTransferRule(deviceId: string, input: unknown): boolean {
+    if (!this.trusted.some((device) => device.deviceId === deviceId) && !this.sessions.get(deviceId)?.session.verified) {
+      this.toast('error', 'Only verified devices can have transfer preferences');
+      return false;
+    }
+    const rule = parseTransferRule(input);
+    if (!rule || (rule.allowBackground && !this.desktop)) {
+      this.toast('error', 'Invalid transfer rule. Background auto-accept is available only in the desktop app.');
+      return false;
+    }
+    try {
+      const copy = new Map(this.transferRules);
+      copy.set(deviceId, rule);
+      localStorage.setItem(TRANSFER_RULES_KEY, JSON.stringify(Object.fromEntries(copy)));
+      this.transferRules = copy;
+      this.toast('success', 'Transfer preferences saved on this device');
+      this.emit();
+      return true;
+    } catch {
+      this.toast('error', 'Could not save transfer preferences on this device; nothing changed');
+      return false;
+    }
+  }
+
   sendFiles(deviceId: string, files: File[]): void {
     const entry = this.sessions.get(deviceId);
     if (!entry) {
@@ -1087,13 +1291,103 @@ export class FluxaApp {
     return true;
   }
 
-  sendSharedContent(deviceId: string, kind: SharedContent['kind'], text: string, url?: string, title?: string): void {
+  private newClipboardSync(session: PeerSession, peerDeviceId: string): ClipboardSync {
+    return new ClipboardSync(session, this.identity!.deviceId, clipboardPort(), {
+      onChange: () => this.emit(),
+      onInvitation: (name) => {
+        this.toast('info', `${name} wants to sync text copied to your clipboard. Accept only if you trust this device.`);
+        void this.desktop?.notify('Clipboard sync request', `Approve text sync with ${name} in Fluxa`);
+      },
+      onError: (message) => this.toast('error', message),
+    });
+  }
+
+  async startClipboardSync(deviceId: string): Promise<void> {
+    const entry = this.sessions.get(deviceId);
+    if (!entry?.session.verified || entry.session.state !== 'connected') {
+      this.toast('error', 'Verify and connect this device before enabling clipboard sync');
+      return;
+    }
+    if (this.clipboard && !['off', 'error'].includes(this.clipboard.view.state)) {
+      this.toast('error', 'Stop your current clipboard session before starting another one');
+      return;
+    }
+    this.clipboard?.close();
+    this.clipboardPeerId = deviceId;
+    this.clipboard = this.newClipboardSync(entry.session, deviceId);
+    await this.clipboard.request();
+  }
+
+  async respondClipboardSync(accept: boolean): Promise<void> {
+    await this.clipboard?.respond(accept);
+  }
+
+  stopClipboardSync(): void {
+    this.clipboard?.stop();
+  }
+
+  private newScreenShare(session: PeerSession): ScreenShare {
+    return new ScreenShare(session, {
+      onChange: () => this.emit(),
+      onInvitation: (name) => {
+        this.toast('info', `${name} wants to show their screen. You must approve to view it.`);
+        void this.desktop?.notify('Screen sharing request', `Approve screen viewing from ${name} in Fluxa`);
+      },
+      onError: (message) => this.toast('error', message),
+    });
+  }
+
+  async startScreenShare(deviceId: string): Promise<void> {
+    const entry = this.sessions.get(deviceId);
+    if (!entry?.session.verified || entry.session.state !== 'connected') {
+      this.toast('error', 'Verify a connected device before sharing your screen');
+      return;
+    }
+    if (this.screen && !['off', 'error'].includes(this.screen.view.state)) {
+      this.toast('error', 'Stop your current screen session before starting another one');
+      return;
+    }
+    this.screen?.close();
+    this.screenPeerId = deviceId;
+    this.screen = this.newScreenShare(entry.session);
+    await this.screen.request();
+  }
+
+  respondScreenShare(accept: boolean): void { this.screen?.respond(accept); }
+  stopScreenShare(): void { this.screen?.stop(); }
+
+  prepareHandoff(rawUrl: string, rawTitle: string): boolean {
+    try {
+      const url = new URL(rawUrl);
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password ||
+          url.href.length > 2048 || rawUrl.length > 2048) throw new Error('Only HTTP(S) tabs without embedded credentials can be handed off (up to 2,048 characters)');
+      const title = rawTitle.replace(/[\x00-\x1f\x7f]/g, ' ').trim().slice(0, 160) || url.hostname;
+      this.handoffDraft = { url: url.href, title };
+      this.toast('info', 'Tab ready. Review the link and choose a verified device to hand it off.');
+      this.emit();
+      return true;
+    } catch (err) {
+      this.toast('error', (err as Error).message || 'Invalid browser handoff link');
+      return false;
+    }
+  }
+
+  clearHandoffDraft(): void {
+    this.handoffDraft = null;
+    this.emit();
+  }
+
+  sendSharedContent(deviceId: string, kind: SharedContent['kind'], text: string, url?: string, title?: string): boolean {
     const entry = this.sessions.get(deviceId);
     try {
       if (!entry?.shares) throw new Error('Select and verify a connected device first');
       entry.shares.send(kind, text, url, title);
       this.toast('info', 'Waiting for the recipient to approve the shared item');
-    } catch (err) { this.toast('error', (err as Error).message); }
+      return true;
+    } catch (err) {
+      this.toast('error', (err as Error).message);
+      return false;
+    }
   }
 
   approveSharedContent(id: string, yes: boolean): void {
@@ -1176,6 +1470,10 @@ export class FluxaApp {
     this.disconnectDevice(deviceId);
     await revokeDevice(deviceId);
     this.trusted = await listTrusted();
+    if (this.transferRules.delete(deviceId)) {
+      try { localStorage.setItem(TRANSFER_RULES_KEY, JSON.stringify(Object.fromEntries(this.transferRules))); }
+      catch { /* the rule is removed from this running session */ }
+    }
     this.toast('info', 'Device removed from trusted devices');
     this.emit();
   }
