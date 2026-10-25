@@ -10,7 +10,7 @@ failed validation and both browser/desktop E2E at `6c49508`. That revision
 changed file selection to stage files for an explicit send, but the tests still
 assumed immediate sending; it also contained two chat typing errors. Package
 jobs were blocked by validation. These are **past revisions**; consult the
-workflow for the commit being evaluated before claiming CI is green. PR #3 subsequently merged at `e310d7963d52`; its **main pipeline 32 passed all nine jobs** and produced independently verified release-signed Android APK/AAB. PR #4's old branch pipeline 38 failed validation/desktop tests before the current combined fixes. The local `work/all-features-and-pr4` tree has **not** run CircleCI; do not substitute pipeline 32 or branch 38 for a new post-merge build.
+workflow for the commit being evaluated before claiming CI is green. PR #3's `e310d7963d52` **main pipeline 32 passed nine jobs** with verified release-signed Android APK/AAB. PR #4's old branch pipeline 38 failed before the combined fixes; updated commit `aff40bc` passed all six PR pipeline 39 jobs and merged as `393fa38f0559`. Its **main pipeline 40 passed all nine jobs** and produced independently verified signed APK/AAB, but compiled APK badging exposed an *implied required camera feature*. This follow-up fixes the manifest and adds an APK-level CI guard; inspect its **own** pipeline and signing evidence before claiming a corrected package.
 
 You can monitor a **public** repository without supplying a personal token:
 
@@ -39,8 +39,10 @@ on the CircleCI plan and an authorised operator; **none was triggered here**.
 - `build-web`: static bundle archive and manifest.
 - `build-linux`: unsigned AppImage/deb, manifest.
 - `build-windows`: Windows machine, NSIS and portable exe, metadata check.
-- `build-android`: Android executor, Capacitor sync, APK/AAB, conditional signing
-  verification. If signing inputs are absent it reports an **unsigned** output;
+- `build-android`: Android executor, Capacitor sync, APK/AAB, compiled-APK
+  optional-camera badging check, conditional signing verification. This now runs
+  on both PR and main branches so manifest regressions block merging. If
+  signing inputs are absent it reports an **unsigned** output;
   a successful build alone is not proof of release signing. In upstream pipeline
   **17**, Android job **173** did have signing enabled: its public build manifest
   reports the APK and AAB signed. The APK's SHA-256 matches the manifest and

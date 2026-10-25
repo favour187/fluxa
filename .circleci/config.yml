@@ -569,7 +569,15 @@ jobs:
             # instead of letting the glob expand into an argument list.
             BT="$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)"
             echo "build-tools: $BT"
-            "$BT/aapt2" dump badging "$APK" | grep -E "^package:|application-label:|uses-permission:"
+            BADGING="$("$BT/aapt2" dump badging "$APK")"
+            printf '%s\n' "$BADGING" | grep -E "^package:|application-label:|uses-permission:"
+            # CAMERA permission otherwise implies a REQUIRED camera even if
+            # camera.any is optional; manual pairing must work on camera-less devices.
+            printf '%s\n' "$BADGING" | grep -F "uses-feature-not-required: name='android.hardware.camera'"
+            printf '%s\n' "$BADGING" | grep -F "uses-feature-not-required: name='android.hardware.camera.any'"
+            if printf '%s\n' "$BADGING" | grep -F "uses-implied-feature: name='android.hardware.camera'"; then
+              echo 'Android camera is unexpectedly required'; exit 1
+            fi
             if [ -n "${FLUXA_ANDROID_KEYSTORE_B64:-}" ]; then
               "$BT/apksigner" verify --verbose --print-certs "$APK" | grep -E "Verified using|Signer #1 certificate DN"
             else
@@ -693,6 +701,12 @@ workflows:
       - build-web:
           filters: *not-main
       - build-linux:
+          requires:
+            - validate
+          filters: *not-main
+      # Run the actual signed/unsigned Android package on PRs too: source
+      # manifest checks alone missed an implied required camera feature.
+      - build-android:
           requires:
             - validate
           filters: *not-main
