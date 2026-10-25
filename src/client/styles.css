@@ -679,6 +679,43 @@ body {
   gap: 16px;
   flex: 1;
 }
+
+/* A coordinated, lightweight ripple on both devices while a verified transfer
+   is active. It never intercepts pointer input or changes transfer state. */
+.stage.transfer-rippling {
+  position: relative;
+  isolation: isolate;
+}
+.stage.transfer-rippling::before,
+.stage.transfer-rippling::after {
+  content: '';
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  width: clamp(150px, 38vw, 340px);
+  aspect-ratio: 1;
+  border: 1px solid rgba(79, 209, 255, 0.34);
+  border-radius: 50%;
+  background: radial-gradient(circle, rgba(79, 209, 255, 0.055), transparent 68%);
+  transform: translate(-50%, -50%) scale(0.45);
+  opacity: 0;
+  pointer-events: none;
+  z-index: 0;
+  animation: transferRipple 1.65s var(--ease) infinite;
+}
+.stage.transfer-rippling::after {
+  border-color: rgba(139, 124, 255, 0.34);
+  animation-delay: 0.82s;
+}
+.stage.transfer-rippling > * {
+  position: relative;
+  z-index: 1;
+}
+@keyframes transferRipple {
+  0% { transform: translate(-50%, -50%) scale(0.45); opacity: 0; }
+  15% { opacity: 0.72; }
+  100% { transform: translate(-50%, -50%) scale(1.45); opacity: 0; }
+}
 .stage-empty {
   flex: 1;
   display: flex;

@@ -435,6 +435,9 @@ export class FluxaUI {
 
   private renderStage(snapshot: AppSnapshot): void {
     const stage = this.q('#stage');
+    // Both endpoints show the same transfer pulse while bytes are moving.
+    // This is visual feedback only; the verified WebRTC transfer stays unchanged.
+    stage.classList.toggle('transfer-rippling', snapshot.transfers.some((transfer) => transfer.state === 'transferring'));
     stage.replaceChildren();
     const session = this.selectedSession(snapshot);
 
