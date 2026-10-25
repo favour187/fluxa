@@ -40,7 +40,7 @@ import {
   type DirectTicket,
   type Relay,
 } from './direct.js';
-import { randomToken } from '../shared/crypto.js';
+import { randomBytes, randomToken, toHex } from '../shared/crypto.js';
 import { nativeAvailability, saveFileNative } from './native.js';
 import { ShareManager, type ReceivedShare } from './share.js';
 import type { SharedContent } from '../shared/protocol.js';
@@ -1027,7 +1027,7 @@ export class FluxaApp {
     if (!clean || clean.length > 4000) { this.toast('error', 'Messages must be between 1 and 4,000 characters'); return; }
     const entry = this.sessions.get(deviceId);
     if (!entry?.session.verified || entry.session.state !== 'connected') { this.toast('error', 'Verify a connected device before messaging'); return; }
-    const id = randomToken(16), sentAt = Date.now();
+    const id = toHex(randomBytes(16)), sentAt = Date.now();
     this.messages = [...this.messages, { id, deviceId, peerName: entry.link.name, direction: 'sent', text: clean, sentAt, status: 'sending' }].slice(-100);
     entry.session.sendControl({ t: 'chat', id, text: clean, sentAt });
     this.emit();
