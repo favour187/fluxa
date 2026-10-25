@@ -1233,36 +1233,44 @@ export class FluxaUI {
   }
 
   /**
-   * Renders a QR code. Only short payloads are attempted: a long one forces the
-   * generator into a huge version, and a canvas of that size exhausts the
-   * renderer's memory (a real crash, not a slow path). Callers must offer
-   * copy/share instead for anything longer.
+   * Render a QR code with the required four-module quiet zone. The explicit
+   * payload ceiling avoids allocating an enormous canvas for malformed input;
+   * callers keep Copy/Share available whenever QR rendering is unavailable.
    */
   private renderQr(text: string): HTMLElement {
     try {
-      if (text.length > 1800) return el('div', 'qr-fallback', 'Code too long for QR — use Copy or Share');
+      if (!text || text.length > 1800) {
+        return el('div', 'qr-fallback', 'QR unavailable — use Copy or Share');
+      }
       const qr = qrcode(0, 'L');
       qr.addData(text);
       qr.make();
       const count = qr.getModuleCount();
-      // Scale the QR to a fixed, scan-friendly canvas instead of rejecting it
-      // merely because its module count grows with longer tickets.
-      const cell = Math.max(2, Math.min(6, Math.floor(600 / count)));
+      const quietZone = 4;
+      // Keep a useful pixel size for both short codes and longer direct tickets.
+      const cell = Math.max(2, Math.min(6, Math.floor(600 / (count + quietZone * 2))));
+      const side = (count + quietZone * 2) * cell;
       const canvas = document.createElement('canvas');
-      canvas.width = count * cell;
-      canvas.height = count * cell;
-      const ctx = canvas.getContext('2d')!;
+      canvas.width = side;
+      canvas.height = side;
+      canvas.setAttribute('role', 'img');
+      canvas.setAttribute('aria-label', 'QR code for Fluxa device pairing');
+      canvas.dataset.testid = 'rendered-pairing-qr';
+      const ctx = canvas.getContext('2d');
+      if (!ctx) return el('div', 'qr-fallback', 'QR unavailable — use Copy or Share');
       ctx.fillStyle = '#ffffff';
-      ctx.fillRect(0, 0, canvas.width, canvas.height);
+      ctx.fillRect(0, 0, side, side);
       ctx.fillStyle = '#08090d';
       for (let row = 0; row < count; row++) {
         for (let col = 0; col < count; col++) {
-          if (qr.isDark(row, col)) ctx.fillRect(col * cell, row * cell, cell, cell);
+          if (qr.isDark(row, col)) {
+            ctx.fillRect((col + quietZone) * cell, (row + quietZone) * cell, cell, cell);
+          }
         }
       }
       return canvas;
     } catch {
-      return el('div', 'qr-fallback', 'QR unavailable');
+      return el('div', 'qr-fallback', 'QR unavailable — use Copy or Share');
     }
   }
 
