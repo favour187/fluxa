@@ -113,6 +113,9 @@ export class FluxaUI {
   private fileInput: HTMLInputElement;
   private folderInput: HTMLInputElement;
   private stagedFiles: File[] = [];
+  private qrScanStream: MediaStream | null = null;
+  private qrScanFrame: number | null = null;
+  private qrScanModal: HTMLElement | null = null;
 
   constructor(
     private readonly app: FluxaApp,
@@ -932,6 +935,7 @@ export class FluxaUI {
   /** Remove a single dialog, leaving any other open dialog untouched. */
   private closeModal(modal: HTMLElement | null): void {
     modal?.remove();
+    if (modal === this.qrScanModal) this.stopQrScanner();
     if (modal === this.pairingModal) this.pairingModal = null;
     if (modal === this.verifyModal) {
       this.verifyModal = null;
@@ -948,6 +952,7 @@ export class FluxaUI {
 
   private closeOverlay(): void {
     const overlay = this.q('#overlay');
+    this.stopQrScanner();
     overlay.classList.remove('active');
     overlay.replaceChildren();
     this.pairingModal = null;
@@ -970,29 +975,43 @@ export class FluxaUI {
         <button class="tab" role="tab" type="button" data-pair-tab="direct" data-testid="pair-tab-direct">Direct code</button>
       </div>
       <div class="pair-panel" data-panel="code">
-        <p class="muted small">Get a code here, then enter it on the other device. It expires in two minutes.</p>
-        <div class="pair-code" data-testid="pair-code">······</div>
-        <div class="qr-wrap"><div class="qr" data-testid="pair-qr"></div><p class="muted tiny">Scan to open a pairing link</p></div>
-        <div class="divider"><span>or join with a code</span></div>
-        <form class="join-form" id="join-form">
-          <input id="join-code" class="code-input" inputmode="latin" autocomplete="off" spellcheck="false" maxlength="6" placeholder="ABC123" aria-label="Pairing code" data-testid="join-code"/>
-          <button class="btn btn-primary" type="submit" data-testid="join-submit">Join</button>
-        </form>
+        <div class="pair-intro">
+          <span class="eyebrow">QUICK PAIRING · 01</span>
+          <p class="pair-lead">Connect these two devices.</p>
+          <p class="muted small">On the other device, scan this QR with its camera and tap the Fluxa link. If the camera only shows a code, type that 6-character code below.</p>
+        </div>
+        <div class="pair-hero">
+          <div class="pair-code" data-testid="pair-code">······</div>
+          <div class="qr-wrap"><div class="qr" data-testid="pair-qr"></div><p class="muted tiny">Open the link shown after scanning</p></div>
+        </div>
+        <div class="join-card">
+          <label for="join-code">Got a code from the other device?</label>
+          <form class="join-form" id="join-form">
+            <input id="join-code" class="code-input" inputmode="latin" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="12" placeholder="Enter 6-character code" aria-label="6-character pairing code" data-testid="join-code"/>
+            <button class="btn btn-primary" type="submit" data-testid="join-submit">Connect</button>
+          </form>
+          <button class="btn btn-ghost scan-launch" type="button" data-testid="scan-qr">Scan QR with this camera</button>
+          <p class="muted tiny">No copying is needed when scanning opens the Fluxa link automatically.</p>
+        </div>
         <p class="notice small" id="offline-notice" hidden data-testid="offline-notice">
           No signalling server is reachable from this device. Use <strong>Direct code</strong> instead — it needs no server at all.
         </p>
         <p class="error-text small" id="pair-error" hidden></p>
       </div>
       <div class="pair-panel" data-panel="direct" hidden>
-        <p class="muted small">
-          Works with no server: this device shows a code, the other device reads it and shows a reply,
-          and you paste the reply back. Everything then runs device-to-device.
-        </p>
+        <div class="pair-intro">
+          <span class="eyebrow">DIRECT PAIRING · NO SIGNAL SERVER</span>
+          <p class="pair-lead">Connect privately, device to device.</p>
+          <p class="muted small">This fallback uses a longer one-time ticket. Scan it with Fluxa's camera scanner or use Copy/Share. Both devices must exchange a ticket before the secure connection starts.</p>
+        </div>
         <div class="direct-idle" data-testid="direct-idle">
           <button class="btn btn-primary" type="button" data-testid="direct-start">Create a code on this device</button>
-          <div class="divider"><span>or read the other device's code</span></div>
-          <textarea class="ticket-input" rows="3" placeholder="FLX1z…" aria-label="Pairing code from the other device" data-testid="direct-join-input"></textarea>
-          <button class="btn btn-ghost" type="button" data-testid="direct-join-submit">Use this code</button>
+          <div class="divider"><span>or paste a ticket from the other device</span></div>
+          <textarea class="ticket-input" rows="3" placeholder="Paste the FLX1 ticket here" aria-label="Pairing ticket from the other device" data-testid="direct-join-input"></textarea>
+          <div class="direct-actions">
+            <button class="btn btn-primary" type="button" data-testid="direct-join-submit">Continue with ticket</button>
+            <button class="btn btn-ghost" type="button" data-testid="scan-qr-direct">Scan QR</button>
+          </div>
         </div>
         <div class="direct-ticket" data-testid="direct-ticket-view" hidden>
           <label class="muted tiny" data-testid="direct-ticket-label">Give this code to the other device</label>
@@ -1000,9 +1019,10 @@ export class FluxaUI {
           <div class="direct-actions">
             <button class="btn btn-ghost btn-sm" type="button" data-testid="direct-copy">Copy code</button>
             <button class="btn btn-ghost btn-sm" type="button" data-testid="direct-share">Share…</button>
+            <button class="btn btn-ghost btn-sm" type="button" data-testid="scan-qr-reply">Scan reply QR</button>
             <button class="btn btn-ghost btn-sm" type="button" data-testid="direct-cancel">Cancel</button>
           </div>
-          <div class="qr-wrap" data-testid="direct-qr-wrap"><div class="qr" data-testid="direct-qr"></div><p class="muted tiny">Scan with the other device</p></div>
+          <div class="qr-wrap" data-testid="direct-qr-wrap"><div class="qr" data-testid="direct-qr"></div><p class="muted tiny">Other device: scan this QR. Then scan their reply QR here.</p></div>
         </div>
         <div class="direct-reply" data-testid="direct-reply-view" hidden>
           <div class="divider"><span>paste the reply from the other device</span></div>
@@ -1016,10 +1036,16 @@ export class FluxaUI {
       this.app.cancelDirect();
       this.closeOverlay();
     });
+    const joinInput = modal.querySelector<HTMLInputElement>('#join-code')!;
+    joinInput.addEventListener('input', () => {
+      joinInput.value = joinInput.value.replace(/[^a-z0-9]/gi, '').slice(0, 6).toUpperCase();
+      modal.querySelector<HTMLElement>('#pair-error')!.hidden = true;
+    });
     const form = modal.querySelector<HTMLFormElement>('#join-form')!;
     form.addEventListener('submit', (e) => {
       e.preventDefault();
       const input = modal.querySelector<HTMLInputElement>('#join-code')!;
+      input.value = input.value.replace(/[^a-z0-9]/gi, '').slice(0, 6).toUpperCase();
       const ok = this.app.joinWithCode(input.value);
       if (!ok) {
         const err = modal.querySelector<HTMLElement>('#pair-error')!;
@@ -1045,6 +1071,9 @@ export class FluxaUI {
       tab.addEventListener('click', () => selectTab(tab.dataset.pairTab!));
     }
 
+    modal.querySelector('[data-testid="scan-qr"]')!.addEventListener('click', () => void this.startQrScanner());
+    modal.querySelector('[data-testid="scan-qr-direct"]')!.addEventListener('click', () => void this.startQrScanner());
+    modal.querySelector('[data-testid="scan-qr-reply"]')!.addEventListener('click', () => void this.startQrScanner());
     modal.querySelector('[data-testid="direct-start"]')!.addEventListener('click', () => {
       void this.app.startDirectPairing();
     });
@@ -1073,6 +1102,35 @@ export class FluxaUI {
     if (this.snapshot?.status === 'offline') selectTab('direct');
     else this.app.requestPairingCode();
     this.syncPairingModal(this.snapshot!);
+  }
+
+  /** QR scanning with automatic routing for short codes and direct tickets. */
+  private async startQrScanner(): Promise<void> {
+    const Detector=(window as unknown as {BarcodeDetector?:new(options?:{formats:string[]})=>{detect:(source:HTMLVideoElement)=>Promise<{rawValue:string}[]>}}).BarcodeDetector;
+    if(!Detector||!navigator.mediaDevices?.getUserMedia){this.app.toast('info','Camera scanning is not supported in this browser. Use your phone camera to open the Fluxa link, or enter the 6-character code below.');return;}
+    if(this.qrScanModal)return;
+    const overlay=this.openOverlay(),modal=el('div','modal modal-qr-scanner');
+    modal.setAttribute('role','dialog');modal.setAttribute('aria-modal','true');modal.setAttribute('aria-label','Scan a Fluxa pairing QR code');modal.dataset.testid='qr-scanner-modal';
+    modal.innerHTML=`<button class="modal-close" type="button" aria-label="Close QR scanner">×</button><span class="eyebrow">FLUXA SCANNER</span><h2>Point at the other screen</h2><p class="muted small">Keep the whole QR inside the frame. Fluxa will recognise the code and continue automatically.</p><div class="scanner-frame"><video autoplay muted playsinline data-testid="qr-scanner-video"></video><span class="scanner-corner tl"></span><span class="scanner-corner tr"></span><span class="scanner-corner bl"></span><span class="scanner-corner br"></span></div><p class="scanner-status muted small" data-testid="qr-scanner-status" aria-live="polite">Starting camera…</p><button class="btn btn-ghost" type="button" data-testid="qr-scanner-cancel">Cancel scan</button>`;
+    overlay.append(modal);this.qrScanModal=modal;
+    modal.querySelector('.modal-close')!.addEventListener('click',()=>this.closeModal(modal));
+    modal.querySelector('[data-testid="qr-scanner-cancel"]')!.addEventListener('click',()=>this.closeModal(modal));
+    const video=modal.querySelector<HTMLVideoElement>('video')!,status=modal.querySelector<HTMLElement>('[data-testid="qr-scanner-status']')!;
+    try{
+      this.qrScanStream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}}});
+      if(this.qrScanModal!==modal){this.qrScanStream.getTracks().forEach(t=>t.stop());this.qrScanStream=null;return;}
+      video.srcObject=this.qrScanStream;await video.play();const detector=new Detector({formats:['qr_code']});status.textContent='Camera ready — searching for a Fluxa QR…';
+      const scan=async():Promise<void>=>{if(this.qrScanModal!==modal)return;try{if(video.readyState>=2){const hits=await detector.detect(video),value=hits[0]?.rawValue;if(value){status.textContent='QR found — connecting…';this.closeModal(modal);await this.consumeScannedQr(value);return;}}}catch{status.textContent='Could not read that frame. Hold the QR steady and try again.';}if(this.qrScanModal===modal)this.qrScanFrame=requestAnimationFrame(()=>void scan());};
+      this.qrScanFrame=requestAnimationFrame(()=>void scan());
+    }catch{status.textContent='Camera permission was denied or the camera is busy. Allow camera access and try again, or enter the code manually.';this.app.toast('error','Fluxa could not open the camera. Check browser camera permission.');}
+  }
+  private stopQrScanner():void{if(this.qrScanFrame!==null)cancelAnimationFrame(this.qrScanFrame);this.qrScanFrame=null;this.qrScanStream?.getTracks().forEach(t=>t.stop());this.qrScanStream=null;this.qrScanModal=null;}
+  private async consumeScannedQr(rawValue:string):Promise<void>{
+    const value=rawValue.trim();let code=value;try{const url=new URL(value,location.origin);code=url.searchParams.get('pair')??value;}catch{/* plain code or ticket */}
+    if(/^[a-z0-9]{6}$/i.test(code)){const input=this.pairingModal?.querySelector<HTMLInputElement>('#join-code');if(input)input.value=code.toUpperCase();const ok=this.app.joinWithCode(code.toUpperCase());if(ok&&this.pairingModal)this.closeModal(this.pairingModal);else if(!ok)this.app.toast('error','That pairing code has expired or is invalid. Ask the other device for a new code.');return;}
+    const compact=value.replace(/\\s+/g,'');
+    if(compact.startsWith('FLX1')){const direct=this.snapshot?.direct;if(direct?.role==='host'&&direct.step==='offer'){const reply=this.pairingModal?.querySelector<HTMLTextAreaElement>('[data-testid="direct-reply-input']');if(reply)reply.value=value;await this.app.completeDirectPairing(value);return;}this.pairingModal?.querySelector<HTMLElement>('[data-pair-tab="direct']')?.click();const input=this.pairingModal?.querySelector<HTMLTextAreaElement>('[data-testid="direct-join-input']');if(input)input.value=value;await this.app.joinDirectPairing(value);return;}
+    this.app.toast('error','That QR is not a Fluxa pairing code. Scan the QR shown inside Fluxa.');
   }
 
   /** Copies text, falling back to the old execCommand path inside sandboxed WebViews. */
