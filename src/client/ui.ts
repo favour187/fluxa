@@ -1128,7 +1128,7 @@ export class FluxaUI {
   private async consumeScannedQr(rawValue:string):Promise<void>{
     const value=rawValue.trim();let code=value;try{const url=new URL(value,location.origin);code=url.searchParams.get('pair')??value;}catch{/* plain code or ticket */}
     if(/^[a-z0-9]{6}$/i.test(code)){const input=this.pairingModal?.querySelector<HTMLInputElement>('#join-code');if(input)input.value=code.toUpperCase();const ok=this.app.joinWithCode(code.toUpperCase());if(ok&&this.pairingModal)this.closeModal(this.pairingModal);else if(!ok)this.app.toast('error','That pairing code has expired or is invalid. Ask the other device for a new code.');return;}
-    const compact=value.replace(/\\s+/g,'');
+    const compact=value.replace(/\s+/g,'');
     if(compact.startsWith('FLX1')){const direct=this.snapshot?.direct;if(direct?.role==='host'&&direct.step==='offer'){const reply=this.pairingModal?.querySelector<HTMLTextAreaElement>('[data-testid="direct-reply-input"]');if(reply)reply.value=value;await this.app.completeDirectPairing(value);return;}this.pairingModal?.querySelector<HTMLElement>('[data-pair-tab="direct"]')?.click();const input=this.pairingModal?.querySelector<HTMLTextAreaElement>('[data-testid="direct-join-input"]');if(input)input.value=value;await this.app.joinDirectPairing(value);return;}
     this.app.toast('error','That QR is not a Fluxa pairing code. Scan the QR shown inside Fluxa.');
   }
