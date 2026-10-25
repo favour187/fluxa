@@ -1719,3 +1719,16 @@ html[data-reduced-motion='true'] .pulse-ring::after {
 .edge-send-card{display:flex;align-items:center;justify-content:space-between;gap:12px;padding:14px;border:1px solid rgba(79,209,255,.32);border-radius:15px;background:linear-gradient(110deg,rgba(139,124,255,.11),rgba(79,209,255,.06));touch-action:pan-y;user-select:none;cursor:grab}.edge-send-card:active{border-color:var(--brand-2);background:rgba(79,209,255,.1)}.edge-send-actions{display:flex;align-items:center;gap:6px;flex-shrink:0}@media(max-width:560px){.edge-send-card{align-items:flex-start;flex-direction:column}.edge-send-actions{align-self:stretch;justify-content:flex-end}}
 .chat-panel{display:flex;flex-direction:column;gap:10px;padding:14px;border:1px solid var(--stroke);border-radius:var(--radius);background:rgba(255,255,255,.025)}.chat-head{display:flex;align-items:center;justify-content:space-between;gap:8px}.chat-head h3{font-size:13px}.chat-messages{display:flex;flex-direction:column;gap:7px;max-height:220px;overflow-y:auto}.chat-empty{text-align:center;padding:10px}.chat-bubble{max-width:88%;align-self:flex-start;padding:8px 11px;border-radius:12px 12px 12px 4px;background:rgba(255,255,255,.055);overflow-wrap:anywhere}.chat-bubble.sent{align-self:flex-end;border-radius:12px 12px 4px 12px;background:rgba(139,124,255,.15)}.chat-bubble p{white-space:pre-wrap}.chat-meta{display:block;margin-top:4px;color:var(--muted);font-size:10px}.chat-form{display:flex;gap:8px}.chat-input{flex:1;min-width:0;border:1px solid var(--stroke-strong);border-radius:11px;padding:10px 12px;background:rgba(0,0,0,.18)}
 @media(prefers-reduced-motion:reduce){.stage.transfer-rippling:before,.stage.transfer-rippling:after{animation:none!important}}
+
+.edge-send-card.is-dragging{z-index:3;transition:none;box-shadow:0 16px 42px rgba(79,209,255,.16)}.edge-send-card.edge-ready{border-color:var(--brand-2);box-shadow:0 0 0 2px rgba(79,209,255,.2),0 16px 42px rgba(79,209,255,.18)}.edge-send-card{will-change:transform;transition:transform .12s ease,border-color .12s ease,box-shadow .12s ease}@media(prefers-reduced-motion:reduce){.edge-send-card{transition:none}}
+
+/* Direct pairing: scannable QR and readable, grouped fallback codes. */
+.modal-pair .ticket-input{font-family:var(--mono);font-size:clamp(12px,2.8vw,14px);line-height:1.85;letter-spacing:.025em;overflow-wrap:anywhere;word-break:break-word;min-height:92px;max-height:190px}
+.modal-pair [data-testid="direct-ticket-view"]{display:grid;gap:12px}
+.modal-pair [data-testid="direct-qr-wrap"]{display:grid;justify-items:center;gap:8px;padding:16px;border:1px solid var(--stroke);border-radius:18px;background:rgba(255,255,255,.025)}
+.modal-pair [data-testid="direct-qr"] canvas{display:block;width:min(100%,280px);height:auto;image-rendering:pixelated;border-radius:8px}
+.modal-pair .direct-actions{display:flex;flex-wrap:wrap;gap:8px}
+.modal-pair .direct-actions .btn{flex:1 1 auto;min-height:42px}
+.modal-pair [data-testid="direct-ticket-label"]{line-height:1.5}
+@media(max-width:480px){.modal-pair{width:min(100% - 20px,520px);padding:20px 16px}.modal-pair [data-testid="direct-qr-wrap"]{padding:12px}.modal-pair [data-testid="direct-qr"] canvas{width:min(100%,240px)}}
+@media(prefers-reduced-motion:reduce){.edge-send-card,.edge-send-card *{scroll-behavior:auto!important}}

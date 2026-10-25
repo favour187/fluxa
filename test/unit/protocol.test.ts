@@ -35,6 +35,24 @@ test('control frames round-trip', () => {
   assert.equal(new Uint8Array(frame).byteLength, CONTROL_HEADER_BYTES + payloadLength);
 });
 
+test('chat control messages round-trip with delivery acknowledgements', () => {
+  const message = { t: 'chat' as const, id: '0123456789abcdef0123456789abcdef', text: 'Hello from Fluxa 👋', sentAt: 1_798_000_000_000 };
+  const decoded = decodeFrame(encodeControl(message));
+  assert.equal(decoded.kind, 'control');
+  if (decoded.kind !== 'control') return;
+  assert.deepEqual(decoded.message, message);
+  const ack = { t: 'chatAck' as const, id: message.id, ok: true, receivedAt: message.sentAt + 20 };
+  const ackDecoded = decodeFrame(encodeControl(ack));
+  assert.equal(ackDecoded.kind, 'control');
+  if (ackDecoded.kind === 'control') assert.deepEqual(ackDecoded.message, ack);
+});
+
+test('chat control rejects malformed IDs, blank text, and oversized messages', () => {
+  assert.throws(() => decodeFrame(encodeControl({ t: 'chat', id: 'too-short', text: 'hello', sentAt: 1 } as never)), /invalid chat control message/);
+  assert.throws(() => decodeFrame(encodeControl({ t: 'chat', id: 'a'.repeat(32), text: '   ', sentAt: 1 } as never)), /invalid chat control message/);
+  assert.throws(() => decodeFrame(encodeControl({ t: 'chat', id: 'a'.repeat(32), text: 'x'.repeat(4001), sentAt: 1 } as never)), /invalid chat control message/);
+});
+
 test('chunk frames round-trip with exact bytes', () => {
   const payload = new Uint8Array([0, 1, 2, 250, 251, 255]);
   const frame = encodeChunk(7, 123456, payload);

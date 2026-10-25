@@ -563,11 +563,29 @@ export class FluxaUI {
       const sendNow = el('button', 'btn btn-primary btn-sm', 'Send now'); sendNow.type = 'button';
       sendNow.addEventListener('click', () => this.sendStaged());
       actions.append(clear, sendNow); swipe.append(summary, actions);
-      let startX = 0, startY = 0;
-      swipe.addEventListener('pointerdown', (event) => { startX = event.clientX; startY = event.clientY; });
-      swipe.addEventListener('pointerup', (event) => {
-        if (event.clientX - startX > 90 && Math.abs(event.clientY - startY) < 70 && event.clientX >= window.innerWidth - 48) this.sendStaged();
+      let startX = 0, startY = 0, startRight = 0, dragging = false;
+      const resetSwipe = () => { dragging = false; swipe.style.transform = ''; swipe.classList.remove('is-dragging', 'edge-ready'); };
+      swipe.addEventListener('pointerdown', (event) => {
+        if (event.pointerType === 'mouse' && event.button !== 0) return;
+        startX = event.clientX; startY = event.clientY; startRight = swipe.getBoundingClientRect().right; dragging = true;
+        try { swipe.setPointerCapture(event.pointerId); } catch { /* capture can fail if the pointer is already cancelled */ }
       });
+      swipe.addEventListener('pointermove', (event) => {
+        if (!dragging) return;
+        const dx = Math.max(0, event.clientX - startX);
+        if (dx > 8 && Math.abs(event.clientY - startY) < 70) {
+          swipe.classList.add('is-dragging');
+          swipe.style.transform = `translateX(${Math.min(dx, Math.max(0, window.innerWidth - startRight))}px)`;
+          swipe.classList.toggle('edge-ready', event.clientX >= window.innerWidth - 48);
+        }
+      });
+      swipe.addEventListener('pointerup', (event) => {
+        const shouldSend = dragging && event.clientX - startX > 90 && Math.abs(event.clientY - startY) < 70 && event.clientX >= window.innerWidth - 48;
+        resetSwipe();
+        if (shouldSend) this.sendStaged();
+      });
+      swipe.addEventListener('pointercancel', resetSwipe);
+      swipe.addEventListener('lostpointercapture', resetSwipe);
       swipe.tabIndex = 0; swipe.setAttribute('role', 'group');
       swipe.setAttribute('aria-label', 'Swipe selected files to the right edge to send');
       swipe.dataset.testid = 'edge-send-card';
@@ -1138,14 +1156,16 @@ export class FluxaUI {
 
     if (direct.ticket) {
       ticketView.hidden = false;
-      ticketArea.value = direct.ticket;
+      // Group characters for easier reading aloud or entering on another device.
+      // decodeTicket deliberately ignores whitespace, so pasted grouped codes work too.
+      ticketArea.value = direct.ticket.replace(/(.{8})/g, '$1 ').trim();
       label.textContent =
         direct.role === 'host'
-          ? 'Step 1 — read this code on the other device'
-          : 'Step 2 — the other device reads this reply code';
+          ? 'Step 1 — scan the QR or enter the grouped code on the other device'
+          : 'Step 2 — scan the QR or enter the grouped reply code on the other device';
       // A pairing ticket carries a full SDP and is far beyond what a QR code can
       // hold; only draw one when it genuinely fits, otherwise offer copy/share.
-      const qrFits = direct.ticket.length <= 300;
+      const qrFits = direct.ticket.length <= 1800;
       qrWrap.hidden = !qrFits;
       if (qrFits && qrNode.dataset.code !== direct.ticket) {
         qrNode.dataset.code = direct.ticket;
@@ -1219,15 +1239,15 @@ export class FluxaUI {
    * copy/share instead for anything longer.
    */
   private renderQr(text: string): HTMLElement {
-    const size = 29;
     try {
-      if (text.length > 300) return el('div', 'qr-fallback', 'Too long for a QR code');
-      const qr = qrcode(0, 'M');
+      if (text.length > 1800) return el('div', 'qr-fallback', 'Code too long for QR — use Copy or Share');
+      const qr = qrcode(0, 'L');
       qr.addData(text);
       qr.make();
       const count = qr.getModuleCount();
-      const cell = Math.floor(size * 3);
-      if (count * cell > 1200) return el('div', 'qr-fallback', 'Too long for a QR code');
+      // Scale the QR to a fixed, scan-friendly canvas instead of rejecting it
+      // merely because its module count grows with longer tickets.
+      const cell = Math.max(2, Math.min(6, Math.floor(600 / count)));
       const canvas = document.createElement('canvas');
       canvas.width = count * cell;
       canvas.height = count * cell;
