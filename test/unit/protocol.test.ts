@@ -48,9 +48,9 @@ test('chat control messages round-trip with delivery acknowledgements', () => {
 });
 
 test('chat control rejects malformed IDs, blank text, and oversized messages', () => {
-  assert.throws(() => encodeControl({ t: 'chat', id: 'too-short', text: 'hello', sentAt: 1 } as never), /invalid chat control message/);
-  assert.throws(() => encodeControl({ t: 'chat', id: 'a'.repeat(32), text: '   ', sentAt: 1 } as never), /invalid chat control message/);
-  assert.throws(() => encodeControl({ t: 'chat', id: 'a'.repeat(32), text: 'x'.repeat(4001), sentAt: 1 } as never), /invalid chat control message/);
+  assert.throws(() => decodeFrame(encodeControl({ t: 'chat', id: 'too-short', text: 'hello', sentAt: 1 } as never)), /invalid chat control message/);
+  assert.throws(() => decodeFrame(encodeControl({ t: 'chat', id: 'a'.repeat(32), text: '   ', sentAt: 1 } as never)), /invalid chat control message/);
+  assert.throws(() => decodeFrame(encodeControl({ t: 'chat', id: 'a'.repeat(32), text: 'x'.repeat(4001), sentAt: 1 } as never)), /invalid chat control message/);
 });
 
 test('chunk frames round-trip with exact bytes', () => {
