@@ -1,5 +1,23 @@
 # Fluxa 0.2.0 — verification and release-readiness record
 
+## Latest combined PR #4 + requested features (local, 2026-10-25)
+
+This new work is on `work/all-features-and-pr4` in a **locally resolved but not-yet-published merge** of PR #4 into main `e310d7963d52`. PR #4's previous branch pipeline 38 failed on old typing/staged-send tests; those results are not a test of this combined tree. The records below supersede the older baseline section for current feature status. No CI, signed package, physical phone test or browser-store publication of this combined tree has been asserted.
+
+| Check | Observed result |
+| --- | --- |
+| `npm run check` | Passed strict TypeScript after the final feature/race fixes. |
+| `npm test` | **93/93 passed** Node/unit/security/extension-link checks. |
+| `npm run test:e2e` | **33/33 passed** Chromium browser E2E after the camera-policy assertion and early-stop media-negotiation fixes (~5.0 min). An earlier targeted QR run saw one transient pairing timeout; the complete 33-test rerun passed, and the boot-time pairing case passed 3/3 on an isolated repeat. Do not claim zero flakiness. |
+| `xvfb-run -a npm run test:desktop` | **6/6 passed** actual Linux Electron process E2E after the final changes (including a simulated canceled OS screen-picker request that settles cleanly). |
+| `npm run android:sync`, `npm run ios:sync` | Both passed after declaring optional Android CAMERA permission and iOS camera usage string, reporting Capacitor App, Clipboard, Filesystem and Share plugin registrations. Linux skipped CocoaPods/Xcode. No Android SDK/Gradle build or iOS compile of this tree. |
+| `npm audit --omit=dev --audit-level=critical`; `git diff --check`; `node scripts/sync-version.mjs --check` | Passed; audit reported `found 0 vulnerabilities` in production dependencies at that run. |
+| Unpacked Chromium extension | Manifest V3 loaded in a headful Linux Chromium extension manager; the URL fragment/review flow passed browser E2E. Store signing and installed-app protocol dispatch in a real browser remain untested. |
+
+Feature E2E exercised: QR pairing from a simulated camera without `BarcodeDetector` and camera cleanup; claim-at-boot; phone-width layout; verified peer chat/file/ripple/swipe; double-consent live clipboard text with denial/stop/feedback-loop prevention (mock OS clipboard); double-consent screen media via an actual WebRTC transceiver (simulated capture picker), repeat-sharing and two different early-stop/renegotiation races; selected-tab handoff to an existing app tab without disrupting its connection; manual receipt/open actions; per-device bounded auto-accept, block and immediate-picker rules; restarted verified OPFS recovery. **Mock permissions/camera/clipboard sources are not real phone/OS compatibility evidence.** An earlier main pipeline 32 for `e310d79` completed all nine jobs with independently checked genuinely release-signed Android APK/AAB artifacts; those are for that earlier commit, not this combined tree.
+
+### Historical baseline below (not the latest tree)
+
 **Date:** 2026-10-25. **Working branch:** `work/universal-transfer`, based on
 `origin/main` at `e58c3ffc56a29d058a037bc6908d2529b6e61d70`.
 At the time of this record, the new work has **not** been built by CircleCI,

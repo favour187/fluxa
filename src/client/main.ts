@@ -1,6 +1,7 @@
 declare const FLUXA_VERSION: string; // replaced from package.json by the browser bundler
 import { FluxaApp } from './app.js';
 import { FluxaUI } from './ui.js';
+import { handoffFromFragment, offerToExistingWindow, listenForHandoffs } from './handoff-bridge.js';
 
 declare global {
   interface Window {
@@ -18,6 +19,17 @@ declare global {
 async function boot(): Promise<void> {
   const root = document.getElementById('app');
   if (!root) throw new Error('#app is missing');
+
+  const importedTab = handoffFromFragment(location.hash);
+  if (importedTab && await offerToExistingWindow(importedTab)) {
+    history.replaceState({}, '', location.pathname);
+    const notice = document.createElement('p');
+    notice.className = 'handoff-landing';
+    notice.textContent = 'Your tab is ready for review in your existing Fluxa window. You can close this tab.';
+    root.append(notice);
+    window.close(); // only succeeds when opened programmatically; the notice is the fallback
+    return;
+  }
 
   const app = new FluxaApp();
   const ui = new FluxaUI(app, root);
@@ -74,12 +86,16 @@ async function boot(): Promise<void> {
     pairCode: () => app.snapshot().pairing?.code ?? null,
   };
 
-  // QR/deep links: /?pair=ABC123 claims the code as soon as the device is ready.
+  // QR/deep links are queued until the selected signalling server is ready.
   const param = new URL(location.href).searchParams.get('pair');
-  if (param && /^[A-Za-z0-9]{6}$/.test(param)) {
-    app.joinWithCode(param);
-    history.replaceState({}, '', location.pathname);
-  }
+  if (param && /^[A-Za-z0-9]{6}$/.test(param)) app.joinPairingLink(location.href);
+
+  // Browser extensions pass ONLY the active tab's URL and title in a URL
+  // fragment, never an HTTP request. This prepares a review draft; no send,
+  // opening, login, cookie transfer or tab inspection happens automatically.
+  if (importedTab) app.prepareHandoff(importedTab.url, importedTab.title);
+  if (param || location.hash.startsWith('#handoff=')) history.replaceState({}, '', location.pathname);
+  listenForHandoffs(app);
 
   // Real Android/iOS project URL schemes let an external camera or share sheet
   // open a short pairing link in the installed app. SAS comparison remains
@@ -92,8 +108,7 @@ async function boot(): Promise<void> {
         try {
           const url = new URL(raw);
           if (url.protocol !== 'fluxa:' || url.host !== 'pair') return;
-          const code = url.searchParams.get('code');
-          if (code && /^[A-Za-z0-9]{6}$/.test(code)) app.joinWithCode(code);
+          app.joinPairingLink(raw);
         } catch { /* ignore malformed external links */ }
       };
       await App.addListener('appUrlOpen', ({ url }) => claim(url));

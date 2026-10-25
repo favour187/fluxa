@@ -12,8 +12,9 @@
     "start": "node dist/server/index.js",
     "serve": "node dist/server/index.js",
     "check": "tsc --noEmit",
-    "test": "node scripts/build.mjs && node --test dist/test/unit/",
-    "test:unit": "node scripts/build.mjs && node --test dist/test/unit/",
+    "test": "node scripts/build.mjs && node --test dist/test/unit/ extension/*.test.mjs",
+    "test:unit": "node scripts/build.mjs && node --test dist/test/unit/ extension/*.test.mjs",
+    "test:extension": "node --test extension/*.test.mjs",
     "test:e2e": "node scripts/build.mjs && playwright test",
     "verify": "npm run check && npm test",
     "build:web": "node scripts/build.mjs",
@@ -31,10 +32,12 @@
   "dependencies": {
     "@capacitor/android": "^6.2.2",
     "@capacitor/app": "^6.0.3",
+    "@capacitor/clipboard": "^6.0.3",
     "@capacitor/core": "^6.2.2",
     "@capacitor/filesystem": "^6.0.4",
     "@capacitor/ios": "^6.2.2",
     "@capacitor/share": "^6.0.4",
+    "jsqr": "^1.4.0",
     "qrcode-generator": "^1.5.2",
     "ws": "^8.22.0"
   },
@@ -60,6 +63,7 @@
   "build": {
     "appId": "com.fluxa.transfer",
     "productName": "Fluxa",
+    "protocols": [{ "name": "Fluxa secure handoff", "schemes": ["fluxa"] }],
     "copyright": "Copyright © 2026 Fluxa contributors",
     "directories": {
       "output": "release",

@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Fluxa Tab Handoff</title>
+  <link rel="stylesheet" href="popup.css" />
+  <script type="module" src="popup.js"></script>
+</head>
+<body>
+  <header><img src="icons/48.png" alt="" width="32" height="32" /><div><strong>FLUXA</strong><small>Tab handoff</small></div></header>
+  <main>
+    <p id="tab-title" class="tab-title">Checking the current tab…</p>
+    <p id="tab-url" class="url"></p>
+    <label for="target">Open handoff in</label>
+    <select id="target">
+      <option value="web">Fluxa web (same browser profile)</option>
+      <option value="desktop">Installed Fluxa desktop app</option>
+    </select>
+    <div id="web-settings">
+      <label for="fluxa-url">Fluxa web address</label>
+      <input id="fluxa-url" type="url" inputmode="url" placeholder="http://127.0.0.1:8787/" spellcheck="false" autocomplete="url" />
+      <small>Use the address where you paired in this browser. Public addresses need HTTPS.</small>
+    </div>
+    <button id="send" type="button" disabled>Open Fluxa to review</button>
+    <p id="status" role="status" aria-live="polite">Nothing is sent until you review the full URL and choose a verified device in Fluxa. The receiver must also approve.</p>
+  </main>
+  <footer>Only the current tab URL and title. Never cookies, passwords or session storage.</footer>
+</body>
+</html>

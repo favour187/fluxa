@@ -10,7 +10,7 @@ failed validation and both browser/desktop E2E at `6c49508`. That revision
 changed file selection to stage files for an explicit send, but the tests still
 assumed immediate sending; it also contained two chat typing errors. Package
 jobs were blocked by validation. These are **past revisions**; consult the
-workflow for the commit being evaluated before claiming CI is green.
+workflow for the commit being evaluated before claiming CI is green. PR #3 subsequently merged at `e310d7963d52`; its **main pipeline 32 passed all nine jobs** and produced independently verified release-signed Android APK/AAB. PR #4's old branch pipeline 38 failed validation/desktop tests before the current combined fixes. The local `work/all-features-and-pr4` tree has **not** run CircleCI; do not substitute pipeline 32 or branch 38 for a new post-merge build.
 
 You can monitor a **public** repository without supplying a personal token:
 

@@ -5,8 +5,9 @@
  * `esc()` helper: a peer must never be able to inject markup into this page.
  */
 import qrcode from 'qrcode-generator';
+import jsQR from 'jsqr';
 import { formatBytes, formatDuration } from '../shared/protocol.js';
-import type { AppSnapshot, FluxaApp, SessionView, TransferView } from './app.js';
+import type { AppSnapshot, FluxaApp, HandoffDraft, SessionView, TransferView } from './app.js';
 import type { SharedContent } from '../shared/protocol.js';
 
 const el = <K extends keyof HTMLElementTagNameMap>(
@@ -118,6 +119,11 @@ export class FluxaUI {
   private stageSignature = '';
   private displayedStageDeviceId: string | null = null;
   private chatDrafts = new Map<string, string>();
+  private handoffTargetId: string | null = null;
+  private qrScanStream: MediaStream | null = null;
+  private qrScanFrame: number | null = null;
+  private qrScanModal: HTMLElement | null = null;
+  private qrScanReturnFocus: HTMLElement | null = null;
 
   constructor(
     private readonly app: FluxaApp,
@@ -178,6 +184,21 @@ export class FluxaUI {
       <button class="device-chip" id="this-device" type="button" data-testid="this-device"></button>`;
     header.append(brand, cluster);
 
+    const clipboardBanner = el('section', 'clipboard-banner');
+    clipboardBanner.id = 'clipboard-banner';
+    clipboardBanner.dataset.testid = 'clipboard-banner';
+    clipboardBanner.setAttribute('role', 'status');
+    clipboardBanner.hidden = true;
+    const screenBanner = el('section', 'clipboard-banner screen-banner');
+    screenBanner.id = 'screen-banner';
+    screenBanner.dataset.testid = 'screen-banner';
+    screenBanner.setAttribute('role', 'status');
+    screenBanner.hidden = true;
+    const handoffBanner = el('section', 'clipboard-banner handoff-banner');
+    handoffBanner.id = 'handoff-banner';
+    handoffBanner.dataset.testid = 'handoff-banner';
+    handoffBanner.hidden = true;
+
     const main = el('main', 'grid');
 
     // Devices
@@ -233,7 +254,7 @@ export class FluxaUI {
     sr.setAttribute('role', 'status');
     sr.setAttribute('aria-live', 'polite');
 
-    this.root.append(header, main, overlay, toasts, sr);
+    this.root.append(header, clipboardBanner, screenBanner, handoffBanner, main, overlay, toasts, sr);
 
     this.q('#pair-btn').addEventListener('click', () => this.openPairing());
     this.q('#this-device').addEventListener('click', () => this.openSettings());
@@ -255,6 +276,9 @@ export class FluxaUI {
     this.renderStatus(snapshot);
     this.renderDevices(snapshot);
     this.renderNearby(snapshot);
+    this.renderClipboardBanner(snapshot);
+    this.renderScreenBanner(snapshot);
+    this.renderHandoffBanner(snapshot);
     this.renderStage(snapshot);
     this.renderTransfers(snapshot);
     this.renderReceivedShares(snapshot);
@@ -404,7 +428,9 @@ export class FluxaUI {
     section.hidden = false;
 
     const address = this.q('#local-address');
-    address.textContent = snapshot.desktop.localUrl.replace(/^http:\/\//, '');
+    address.textContent = snapshot.desktop.lanUrls.length
+      ? snapshot.desktop.lanUrls.map((url) => url.replace(/^http:\/\//, '')).join(' · ')
+      : `${snapshot.desktop.localUrl.replace(/^http:\/\//, '')} (this device only)`;
 
     const list = this.q('#nearby-list');
     const empty = this.q('#nearby-empty');
@@ -434,6 +460,109 @@ export class FluxaUI {
     }
   }
 
+  private renderClipboardBanner(snapshot: AppSnapshot): void {
+    const banner = this.q('#clipboard-banner');
+    const sync = snapshot.clipboard;
+    banner.hidden = !sync || !['incoming', 'active', 'requesting'].includes(sync.state);
+    if (banner.hidden || !sync) {
+      banner.replaceChildren();
+      return;
+    }
+    banner.replaceChildren();
+    const copy = el('div');
+    copy.append(el('strong', undefined, sync.state === 'incoming'
+      ? `${sync.peerName} wants to sync your text clipboard`
+      : sync.state === 'active' ? `Live clipboard sync with ${sync.peerName}` : `Asking ${sync.peerName} to sync clipboards…`));
+    copy.append(el('p', 'muted small', sync.state === 'incoming'
+      ? 'Both people must agree. Future copied text, including passwords, can reach the other device. No existing text is sent.'
+      : 'Text only, up to 16 KiB. No existing text is sent; stop at any time.'));
+    const actions = el('div', 'clipboard-actions');
+    if (sync.state === 'incoming') {
+      const accept = el('button', 'btn btn-primary btn-sm', 'Accept sync');
+      accept.type = 'button'; accept.dataset.testid = 'clipboard-accept';
+      accept.addEventListener('click', () => void this.app.respondClipboardSync(true));
+      const decline = el('button', 'btn btn-ghost btn-sm', 'Decline');
+      decline.type = 'button'; decline.dataset.testid = 'clipboard-decline';
+      decline.addEventListener('click', () => void this.app.respondClipboardSync(false));
+      actions.append(accept, decline);
+    } else {
+      const stop = el('button', 'btn btn-ghost btn-sm', sync.state === 'active' ? 'Stop sync' : 'Cancel request');
+      stop.type = 'button'; stop.dataset.testid = 'clipboard-stop';
+      stop.addEventListener('click', () => this.app.stopClipboardSync());
+      actions.append(stop);
+    }
+    banner.append(copy, actions);
+  }
+
+  private renderScreenBanner(snapshot: AppSnapshot): void {
+    const banner = this.q('#screen-banner');
+    const share = snapshot.screen;
+    banner.hidden = !share || !['incoming', 'requesting', 'starting', 'sharing', 'viewing'].includes(share.state);
+    if (!share || banner.hidden) { banner.replaceChildren(); return; }
+    banner.replaceChildren();
+    const copy = el('div');
+    copy.append(el('strong', undefined, share.state === 'incoming'
+      ? `${share.peerName} wants to show their screen`
+      : share.state === 'viewing' ? `Viewing ${share.peerName}'s screen`
+        : share.state === 'sharing' ? `Your screen is visible to ${share.peerName}`
+          : share.state === 'starting' ? 'Starting encrypted screen video…'
+            : `Asking ${share.peerName} to view your screen…`));
+    copy.append(el('p', 'muted small', share.state === 'incoming'
+      ? 'Accept to view a live screen. Fluxa cannot control, record, or access the other device.'
+      : 'Live video only, no audio, recording, or remote control. Stop at any time.'));
+    const actions = el('div', 'clipboard-actions');
+    if (share.state === 'incoming') {
+      const yes = el('button', 'btn btn-primary btn-sm', 'View screen');
+      yes.type = 'button'; yes.dataset.testid = 'screen-accept';
+      yes.addEventListener('click', () => this.app.respondScreenShare(true));
+      const no = el('button', 'btn btn-ghost btn-sm', 'Decline');
+      no.type = 'button'; no.dataset.testid = 'screen-decline';
+      no.addEventListener('click', () => this.app.respondScreenShare(false));
+      actions.append(yes, no);
+    } else {
+      const stop = el('button', 'btn btn-ghost btn-sm', share.state === 'requesting' ? 'Cancel request' : 'Stop screen');
+      stop.type = 'button'; stop.dataset.testid = 'screen-stop';
+      stop.addEventListener('click', () => this.app.stopScreenShare());
+      actions.append(stop);
+    }
+    banner.append(copy, actions);
+  }
+
+  private renderHandoffBanner(snapshot: AppSnapshot): void {
+    const banner = this.q('#handoff-banner');
+    const draft = snapshot.handoffDraft;
+    banner.hidden = !draft;
+    if (!draft) { banner.replaceChildren(); return; }
+    banner.replaceChildren();
+    const copy = el('div');
+    copy.append(el('strong', undefined, `Continue “${draft.title}” on another device`));
+    copy.append(el('p', 'muted small', `${new URL(draft.url).host} · Review the FULL link before sending; URLs may contain private tokens. Sign in on the receiving device separately.`));
+    const actions = el('div', 'clipboard-actions');
+    const connected = snapshot.sessions.filter((session) => session.verified && session.state === 'connected');
+    const target = el('select');
+    target.dataset.testid = 'handoff-target';
+    target.setAttribute('aria-label', 'Device for browser tab');
+    for (const session of connected) {
+      const option = el('option', undefined, session.name);
+      option.value = session.deviceId;
+      target.append(option);
+    }
+    const preferred = this.handoffTargetId ?? this.selectedDeviceId;
+    if (preferred && connected.some((session) => session.deviceId === preferred)) target.value = preferred;
+    target.addEventListener('change', () => { this.handoffTargetId = target.value; });
+    const review = el('button', 'btn btn-primary btn-sm', 'Review & send');
+    review.type = 'button'; review.dataset.testid = 'handoff-review';
+    review.disabled = connected.length === 0;
+    review.addEventListener('click', () => this.openShareComposer('session', target.value, draft));
+    const discard = el('button', 'btn btn-ghost btn-sm', 'Discard');
+    discard.type = 'button'; discard.dataset.testid = 'handoff-discard';
+    discard.addEventListener('click', () => this.app.clearHandoffDraft());
+    if (connected.length) actions.append(target, review);
+    else actions.append(el('span', 'muted small', 'Pair and verify a device first.'));
+    actions.append(discard);
+    banner.append(copy, actions);
+  }
+
   private selectedSession(snapshot: AppSnapshot): SessionView | null {
     if (!this.selectedDeviceId) return null;
     return snapshot.sessions.find((s) => s.deviceId === this.selectedDeviceId) ?? null;
@@ -452,6 +581,9 @@ export class FluxaUI {
       session?.state, session?.verified, session?.error,
       session?.connection?.direct, session?.connection?.type,
       snapshot.iceConfigured, this.stagedForDeviceId, this.stagedRevision, messageSignature,
+      snapshot.clipboard?.peerDeviceId, snapshot.clipboard?.state,
+      snapshot.screen?.peerDeviceId, snapshot.screen?.state, snapshot.screen?.stream?.id,
+      session ? this.app.transferRule(session.deviceId) : null,
     ]);
     if (signature === this.stageSignature) return;
     this.stageSignature = signature;
@@ -515,6 +647,7 @@ export class FluxaUI {
       return;
     }
 
+    const rule = this.app.transferRule(session.deviceId);
     const drop = el('div', 'dropzone');
     drop.id = 'dropzone';
     drop.dataset.testid = 'dropzone';
@@ -526,11 +659,11 @@ export class FluxaUI {
       <p><strong>Drop anything here</strong></p>
       <p class="muted small">Files, folders, photos, video, archives, installers</p>`;
     const buttons = el('div', 'stage-actions');
-    const pick = el('button', 'btn btn-primary', 'Choose files');
+    const pick = el('button', 'btn btn-primary', rule.sendImmediately ? 'Choose & send files' : 'Choose files');
     pick.type = 'button';
     pick.dataset.testid = 'choose-files';
     pick.addEventListener('click', () => this.fileInput.click());
-    const folder = el('button', 'btn btn-ghost', 'Choose folder');
+    const folder = el('button', 'btn btn-ghost', rule.sendImmediately ? 'Choose & send folder' : 'Choose folder');
     folder.type = 'button';
     folder.dataset.testid = 'choose-folder';
     folder.addEventListener('click', () => this.folderInput.click());
@@ -544,6 +677,31 @@ export class FluxaUI {
       button.addEventListener('click', () => this.openShareComposer(kind, session.deviceId));
       buttons.append(button);
     }
+    const currentSync = snapshot.clipboard;
+    if (!currentSync || ['off', 'error'].includes(currentSync.state)) {
+      const enable = el('button', 'btn btn-ghost', 'Sync text clipboard');
+      enable.type = 'button'; enable.dataset.testid = 'clipboard-start';
+      enable.addEventListener('click', () => void this.app.startClipboardSync(session.deviceId));
+      buttons.append(enable);
+    } else if (currentSync.peerDeviceId === session.deviceId && currentSync.state === 'active') {
+      const stop = el('button', 'btn btn-ghost', 'Stop clipboard sync');
+      stop.type = 'button'; stop.addEventListener('click', () => this.app.stopClipboardSync());
+      buttons.append(stop);
+    }
+    if (!snapshot.screen || ['off', 'error'].includes(snapshot.screen.state)) {
+      const share = el('button', 'btn btn-ghost', 'Share screen');
+      share.type = 'button'; share.dataset.testid = 'screen-start';
+      if (!navigator.mediaDevices?.getDisplayMedia) {
+        share.disabled = true;
+        share.title = 'Screen capture is unavailable on this device; receiving a screen may still work';
+      }
+      share.addEventListener('click', () => void this.app.startScreenShare(session.deviceId));
+      buttons.append(share);
+    }
+    const preferences = el('button', 'btn btn-ghost', 'Transfer rules');
+    preferences.type = 'button'; preferences.dataset.testid = 'transfer-rules';
+    preferences.addEventListener('click', () => this.openTransferRules(session));
+    buttons.append(preferences);
 
     drop.addEventListener('click', () => this.fileInput.click());
     drop.addEventListener('keydown', (e) => {
@@ -569,6 +727,28 @@ export class FluxaUI {
     });
 
     stage.append(drop, buttons);
+    stage.append(el('p', 'muted tiny', rule.incoming === 'auto'
+      ? `Incoming: auto-accept only ${rule.extensions.join(', ')} up to ${rule.maxMiB} MiB into private storage.`
+      : rule.incoming === 'block' ? 'Incoming: blocked by your rule.' : 'Incoming: you approve each transfer.'));
+
+    if (snapshot.screen?.peerDeviceId === session.deviceId && snapshot.screen.state === 'viewing') {
+      const preview = el('section', 'screen-preview');
+      preview.dataset.testid = 'screen-preview';
+      preview.append(el('strong', undefined, `${session.name}'s live screen`));
+      if (snapshot.screen.stream) {
+        const video = el('video');
+        video.dataset.testid = 'screen-video';
+        video.autoplay = true;
+        video.playsInline = true;
+        video.muted = true;
+        video.controls = true;
+        video.setAttribute('aria-label', `${session.name}'s shared screen`);
+        video.srcObject = snapshot.screen.stream;
+        preview.append(video);
+        void video.play().catch(() => { /* the user can press the native Play control */ });
+      } else preview.append(el('p', 'muted small', 'Waiting for the other device to begin streaming…'));
+      stage.append(preview);
+    }
 
     if (this.stagedFiles.length && this.stagedForDeviceId === session.deviceId) {
       const swipe = el('section', 'edge-send-card');
@@ -663,11 +843,21 @@ export class FluxaUI {
 
   private onFilesPicked(list: FileList | null): void {
     if (!list?.length || !this.selectedDeviceId) return;
-    this.stagedFiles = Array.from(list);
-    this.stagedForDeviceId = this.selectedDeviceId;
-    this.stagedRevision++;
+    const files = Array.from(list);
     this.fileInput.value = '';
     this.folderInput.value = '';
+    const selected = this.selectedDeviceId;
+    const session = this.snapshot?.sessions.find((peer) => peer.deviceId === selected);
+    if (session?.verified && session.state === 'connected' && this.app.transferRule(selected).sendImmediately) {
+      this.stagedFiles = [];
+      this.stagedForDeviceId = null;
+      this.stagedRevision++;
+      this.send(files); // selection itself is the explicit send gesture for this preference
+    } else {
+      this.stagedFiles = files;
+      this.stagedForDeviceId = selected;
+      this.stagedRevision++;
+    }
     if (this.snapshot) this.renderStage(this.snapshot);
   }
 
@@ -831,8 +1021,63 @@ export class FluxaUI {
     row.actions.hidden = !cancellable && !saveable && !resumable;
   }
 
+  /** Rules are local to this device and one fingerprint-pinned peer. */
+  private openTransferRules(session: SessionView): void {
+    const rule = this.app.transferRule(session.deviceId);
+    const overlay = this.openOverlay();
+    const modal = el('div', 'modal modal-share');
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-label', `Transfer rules for ${session.name}`);
+    modal.dataset.testid = 'transfer-rules-modal';
+    modal.innerHTML = `<button type="button" class="modal-close" aria-label="Close">×</button>
+      <h2>Transfer rules · ${esc(session.name)}</h2>
+      <p class="muted small">Only for this verified device. Nothing can auto-open or save to a public folder. Clear rules by removing the trusted device.</p>
+      <form id="transfer-rules-form" class="rule-form">
+        <label for="incoming-rule">When files arrive</label>
+        <select id="incoming-rule" data-testid="incoming-rule">
+          <option value="ask">Ask every time (recommended)</option>
+          <option value="auto">Auto-accept small allowlisted files</option>
+          <option value="block">Block incoming files</option>
+        </select>
+        <label for="auto-max">Auto-accept batch limit · MiB (1–100)</label>
+        <input id="auto-max" type="number" min="1" max="100" step="1" data-testid="auto-max" />
+        <label for="allowed-extensions">Allowed file extensions (comma-separated, maximum 12)</label>
+        <input id="allowed-extensions" placeholder=".jpg, .png, .pdf, .txt" spellcheck="false" data-testid="allowed-extensions" />
+        <label class="switch-row"><input type="checkbox" id="send-immediately" data-testid="send-immediately" />
+          <span>Send as soon as I select files (skip the staged swipe/Send step)</span></label>
+        <label class="switch-row"><input type="checkbox" id="allow-background" data-testid="allow-background"
+          ${this.snapshot?.desktop ? '' : 'disabled'} />
+          <span>Auto-accept while the desktop app window is not visible (desktop only)</span></label>
+        <p class="muted tiny">Automation runs only over a verified connection and stores received bytes in private app storage. It falls back to Ask if the batch exceeds your rule, lacks durable storage, or uses another extension. Browser and phone background processing is not guaranteed.</p>
+        <div class="modal-actions"><button type="button" class="btn btn-ghost" id="rules-cancel">Cancel</button>
+          <button type="submit" class="btn btn-primary" data-testid="save-transfer-rules">Save rules</button></div>
+      </form>`;
+    modal.querySelector<HTMLSelectElement>('#incoming-rule')!.value = rule.incoming;
+    modal.querySelector<HTMLInputElement>('#auto-max')!.value = String(rule.maxMiB);
+    modal.querySelector<HTMLInputElement>('#allowed-extensions')!.value = rule.extensions.join(', ');
+    modal.querySelector<HTMLInputElement>('#send-immediately')!.checked = rule.sendImmediately;
+    modal.querySelector<HTMLInputElement>('#allow-background')!.checked = rule.allowBackground;
+    modal.querySelector('.modal-close')!.addEventListener('click', () => this.closeModal(modal));
+    modal.querySelector('#rules-cancel')!.addEventListener('click', () => this.closeModal(modal));
+    modal.querySelector<HTMLFormElement>('#transfer-rules-form')!.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const incoming = modal.querySelector<HTMLSelectElement>('#incoming-rule')!.value;
+      const maxMiB = Number(modal.querySelector<HTMLInputElement>('#auto-max')!.value);
+      const extensions = modal.querySelector<HTMLInputElement>('#allowed-extensions')!.value
+        .split(',').map((value) => value.trim().toLowerCase()).filter(Boolean);
+      const sendImmediately = modal.querySelector<HTMLInputElement>('#send-immediately')!.checked;
+      const allowBackground = modal.querySelector<HTMLInputElement>('#allow-background')!.checked;
+      if (this.app.setTransferRule(session.deviceId, { incoming, maxMiB, extensions, sendImmediately, allowBackground })) {
+        this.closeModal(modal);
+      }
+    });
+    overlay.append(modal);
+    modal.querySelector<HTMLSelectElement>('#incoming-rule')!.focus();
+  }
+
   /** No passive clipboard access: this is only called from a visible button. */
-  private openShareComposer(kind: SharedContent['kind'], deviceId: string): void {
+  private openShareComposer(kind: SharedContent['kind'], deviceId: string, draft?: HandoffDraft): void {
     const overlay = this.openOverlay();
     const modal = el('div', 'modal modal-share');
     modal.setAttribute('role', 'dialog');
@@ -842,14 +1087,20 @@ export class FluxaUI {
     const heading = kind === 'clipboard' ? 'Share text / clipboard' : kind === 'link' ? 'Share a link' : 'Handoff a work link';
     modal.innerHTML = `<button type="button" class="modal-close" aria-label="Close">×</button>
       <h2>${heading}</h2>
-      <p class="muted small">Only what you enter here is sent. Never paste passwords, tokens, cookies or private app data. The other device must approve it.</p>
-      ${kind === 'clipboard' ? '' : '<label for="shared-url">HTTP(S) URL</label><input id="shared-url" type="url" placeholder="https://example.com" data-testid="shared-url" />'}
+      <p class="muted small">Review the full link, including its query and fragment: they may contain private tokens. No cookies, passwords or sign-in session is moved. The other device must approve it.</p>
+      ${kind === 'clipboard' ? '' : '<label for="shared-url">HTTP(S) URL</label><input id="shared-url" type="url" maxlength="2048" placeholder="https://example.com" data-testid="shared-url" />'}
       ${kind === 'session' ? '<label for="shared-title">Title</label><input id="shared-title" maxlength="256" placeholder="Continue reading" data-testid="shared-title" />' : ''}
       <label for="shared-text">${kind === 'clipboard' ? 'Text to share' : 'Note (optional)'}</label>
       <textarea id="shared-text" rows="4" maxlength="16000" data-testid="shared-text"></textarea>
       ${kind === 'clipboard' ? '<button type="button" class="btn btn-ghost btn-xs" id="paste-clipboard">Paste clipboard (permission required)</button>' : ''}
       <div class="modal-actions"><button type="button" class="btn btn-ghost" id="share-cancel">Cancel</button>
       <button type="button" class="btn btn-primary" id="share-send" data-testid="send-shared">Request approval</button></div>`;
+    if (draft) {
+      const urlInput = modal.querySelector<HTMLInputElement>('#shared-url');
+      const titleInput = modal.querySelector<HTMLInputElement>('#shared-title');
+      if (urlInput) urlInput.value = draft.url;
+      if (titleInput) titleInput.value = draft.title;
+    }
     modal.querySelector('.modal-close')!.addEventListener('click', () => this.closeModal(modal));
     modal.querySelector('#share-cancel')!.addEventListener('click', () => this.closeModal(modal));
     modal.querySelector('#paste-clipboard')?.addEventListener('click', () => {
@@ -868,8 +1119,10 @@ export class FluxaUI {
           if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) throw Error();
         } catch { this.app.toast('error', 'Only HTTP(S) links without embedded credentials are allowed'); return; }
       }
-      this.app.sendSharedContent(deviceId, kind, text, url, title);
-      this.closeModal(modal);
+      if (this.app.sendSharedContent(deviceId, kind, text, url, title)) {
+        if (draft) this.app.clearHandoffDraft();
+        this.closeModal(modal);
+      }
     });
     overlay.append(modal);
     (modal.querySelector<HTMLInputElement>('#shared-url') ?? modal.querySelector<HTMLTextAreaElement>('#shared-text'))?.focus();
@@ -962,7 +1215,7 @@ export class FluxaUI {
     // An incoming transfer needs an explicit decision, so Escape never dismisses it.
     if (this.q('#overlay').querySelector('[data-testid="incoming-modal"], [data-testid="shared-approval"]')) return;
     event.preventDefault();
-    const open = this.q('#overlay').querySelector<HTMLElement>('.modal');
+    const open = this.qrScanModal ?? this.q('#overlay').querySelector<HTMLElement>('.modal:not([hidden])');
     if (!open) return;
     if (open === this.verifyModal) {
       const session = this.snapshot?.verification;
@@ -977,6 +1230,10 @@ export class FluxaUI {
   /** Remove a single dialog, leaving any other open dialog untouched. */
   private closeModal(modal: HTMLElement | null): void {
     modal?.remove();
+    if (modal === this.qrScanModal) {
+      this.stopQrScanner();
+      if (this.pairingModal) this.pairingModal.hidden = false;
+    }
     if (modal === this.pairingModal) this.pairingModal = null;
     if (modal === this.verifyModal) {
       this.verifyModal = null;
@@ -993,6 +1250,7 @@ export class FluxaUI {
 
   private closeOverlay(): void {
     const overlay = this.q('#overlay');
+    this.stopQrScanner();
     overlay.classList.remove('active');
     overlay.replaceChildren();
     this.pairingModal = null;
@@ -1015,29 +1273,44 @@ export class FluxaUI {
         <button class="tab" role="tab" type="button" data-pair-tab="direct" data-testid="pair-tab-direct">Direct code</button>
       </div>
       <div class="pair-panel" data-panel="code">
-        <p class="muted small">Get a code here, then enter it on the other device. It expires in two minutes.</p>
-        <div class="pair-code" data-testid="pair-code">······</div>
-        <div class="qr-wrap"><div class="qr" data-testid="pair-qr"></div><p class="muted tiny">Scan to open a pairing link</p></div>
-        <div class="divider"><span>or join with a code</span></div>
-        <form class="join-form" id="join-form">
-          <input id="join-code" class="code-input" inputmode="latin" autocomplete="off" spellcheck="false" maxlength="6" placeholder="ABC123" aria-label="Pairing code" data-testid="join-code"/>
-          <button class="btn btn-primary" type="submit" data-testid="join-submit">Join</button>
-        </form>
+        <div class="pair-intro">
+          <span class="eyebrow">QUICK PAIRING · 01</span>
+          <p class="pair-lead">Connect these two devices.</p>
+          <p class="muted small">On the other device, tap Scan QR in Fluxa, or enter the short code while connected to the same server. Both devices must compare the verification code.</p>
+        </div>
+        <div class="pair-hero">
+          <div class="pair-code" data-testid="pair-code">······</div>
+          <div class="qr-wrap"><div class="qr" data-testid="pair-qr"></div><p class="muted tiny">Open the link shown after scanning</p></div>
+        </div>
+        <p class="muted small" id="qr-unavailable" hidden>No phone-reachable server address is available. Connect both devices to the same server in Settings or use Direct code.</p>
+        <div class="join-card">
+          <label for="join-code">Got a code from the other device?</label>
+          <form class="join-form" id="join-form">
+            <input id="join-code" class="code-input" inputmode="latin" autocomplete="off" autocapitalize="characters" spellcheck="false" maxlength="12" placeholder="Enter 6-character code" aria-label="6-character pairing code" data-testid="join-code"/>
+            <button class="btn btn-primary" type="submit" data-testid="join-submit">Connect</button>
+          </form>
+          <button class="btn btn-ghost scan-launch" type="button" data-testid="scan-qr">Scan QR with this camera</button>
+          <p class="muted tiny">No copying is needed when scanning opens the Fluxa link automatically.</p>
+        </div>
         <p class="notice small" id="offline-notice" hidden data-testid="offline-notice">
           No signalling server is reachable from this device. Use <strong>Direct code</strong> instead — it needs no server at all.
         </p>
         <p class="error-text small" id="pair-error" hidden></p>
       </div>
       <div class="pair-panel" data-panel="direct" hidden>
-        <p class="muted small">
-          Works with no server: this device shows a code, the other device reads it and shows a reply,
-          and you paste the reply back. Everything then runs device-to-device.
-        </p>
+        <div class="pair-intro">
+          <span class="eyebrow">DIRECT PAIRING · NO SIGNAL SERVER</span>
+          <p class="pair-lead">Connect privately, device to device.</p>
+          <p class="muted small">This fallback uses a longer one-time ticket. Scan it with Fluxa's camera scanner or use Copy/Share. Both devices must exchange a ticket before the secure connection starts.</p>
+        </div>
         <div class="direct-idle" data-testid="direct-idle">
           <button class="btn btn-primary" type="button" data-testid="direct-start">Create a code on this device</button>
-          <div class="divider"><span>or read the other device's code</span></div>
-          <textarea class="ticket-input" rows="3" placeholder="FLX1z…" aria-label="Pairing code from the other device" data-testid="direct-join-input"></textarea>
-          <button class="btn btn-ghost" type="button" data-testid="direct-join-submit">Use this code</button>
+          <div class="divider"><span>or paste a ticket from the other device</span></div>
+          <textarea class="ticket-input" rows="3" placeholder="Paste the FLX1 ticket here" aria-label="Pairing ticket from the other device" data-testid="direct-join-input"></textarea>
+          <div class="direct-actions">
+            <button class="btn btn-primary" type="button" data-testid="direct-join-submit">Continue with ticket</button>
+            <button class="btn btn-ghost" type="button" data-testid="scan-qr-direct">Scan QR</button>
+          </div>
         </div>
         <div class="direct-ticket" data-testid="direct-ticket-view" hidden>
           <label class="muted tiny" data-testid="direct-ticket-label">Give this code to the other device</label>
@@ -1045,9 +1318,10 @@ export class FluxaUI {
           <div class="direct-actions">
             <button class="btn btn-ghost btn-sm" type="button" data-testid="direct-copy">Copy code</button>
             <button class="btn btn-ghost btn-sm" type="button" data-testid="direct-share">Share…</button>
+            <button class="btn btn-ghost btn-sm" type="button" data-testid="scan-qr-reply">Scan reply QR</button>
             <button class="btn btn-ghost btn-sm" type="button" data-testid="direct-cancel">Cancel</button>
           </div>
-          <div class="qr-wrap" data-testid="direct-qr-wrap"><div class="qr" data-testid="direct-qr"></div><p class="muted tiny">Scan with the other device</p></div>
+          <div class="qr-wrap" data-testid="direct-qr-wrap"><div class="qr" data-testid="direct-qr"></div><p class="muted tiny">Other device: scan this QR. Then scan their reply QR here.</p></div>
         </div>
         <div class="direct-reply" data-testid="direct-reply-view" hidden>
           <div class="divider"><span>paste the reply from the other device</span></div>
@@ -1061,10 +1335,16 @@ export class FluxaUI {
       this.app.cancelDirect();
       this.closeOverlay();
     });
+    const joinInput = modal.querySelector<HTMLInputElement>('#join-code')!;
+    joinInput.addEventListener('input', () => {
+      joinInput.value = joinInput.value.replace(/[^a-z0-9]/gi, '').slice(0, 6).toUpperCase();
+      modal.querySelector<HTMLElement>('#pair-error')!.hidden = true;
+    });
     const form = modal.querySelector<HTMLFormElement>('#join-form')!;
     form.addEventListener('submit', (e) => {
       e.preventDefault();
       const input = modal.querySelector<HTMLInputElement>('#join-code')!;
+      input.value = input.value.replace(/[^a-z0-9]/gi, '').slice(0, 6).toUpperCase();
       const ok = this.app.joinWithCode(input.value);
       if (!ok) {
         const err = modal.querySelector<HTMLElement>('#pair-error')!;
@@ -1090,6 +1370,9 @@ export class FluxaUI {
       tab.addEventListener('click', () => selectTab(tab.dataset.pairTab!));
     }
 
+    modal.querySelector('[data-testid="scan-qr"]')!.addEventListener('click', () => void this.startQrScanner());
+    modal.querySelector('[data-testid="scan-qr-direct"]')!.addEventListener('click', () => void this.startQrScanner());
+    modal.querySelector('[data-testid="scan-qr-reply"]')!.addEventListener('click', () => void this.startQrScanner());
     modal.querySelector('[data-testid="direct-start"]')!.addEventListener('click', () => {
       void this.app.startDirectPairing();
     });
@@ -1118,6 +1401,150 @@ export class FluxaUI {
     if (this.snapshot?.status === 'offline') selectTab('direct');
     else this.app.requestPairingCode();
     this.syncPairingModal(this.snapshot!);
+  }
+
+  /** Read a camera QR locally. BarcodeDetector is an optimization, not a requirement. */
+  private async startQrScanner(): Promise<void> {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      this.app.toast('info', 'Camera access needs HTTPS or localhost. Use a phone camera to open the pairing link, or enter the code manually.');
+      return;
+    }
+    if (this.qrScanModal) return;
+    this.qrScanReturnFocus = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+    const overlay = this.openOverlay();
+    const modal = el('div', 'modal modal-qr-scanner');
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-label', 'Scan a Fluxa pairing QR code');
+    modal.dataset.testid = 'qr-scanner-modal';
+    modal.innerHTML = `
+      <button class="modal-close" type="button" aria-label="Close QR scanner">×</button>
+      <span class="eyebrow">FLUXA SCANNER</span>
+      <h2>Point at the other screen</h2>
+      <p class="muted small">Keep the whole QR inside the frame. Fluxa will read it on this device.</p>
+      <div class="scanner-frame"><video autoplay muted playsinline data-testid="qr-scanner-video"></video>
+        <span class="scanner-corner tl"></span><span class="scanner-corner tr"></span>
+        <span class="scanner-corner bl"></span><span class="scanner-corner br"></span>
+      </div>
+      <p class="scanner-status muted small" data-testid="qr-scanner-status" aria-live="polite">Starting camera…</p>
+      <button class="btn btn-ghost" type="button" data-testid="qr-scanner-cancel">Cancel scan</button>`;
+    if (this.pairingModal) this.pairingModal.hidden = true;
+    overlay.append(modal);
+    this.qrScanModal = modal;
+    const close = () => this.closeModal(modal);
+    modal.querySelector('.modal-close')!.addEventListener('click', close);
+    modal.querySelector('[data-testid="qr-scanner-cancel"]')!.addEventListener('click', close);
+    modal.querySelector<HTMLButtonElement>('[data-testid="qr-scanner-cancel"]')!.focus();
+    const video = modal.querySelector<HTMLVideoElement>('video')!;
+    const status = modal.querySelector<HTMLElement>('[data-testid="qr-scanner-status"]')!;
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false, video: { facingMode: { ideal: 'environment' }, width: { ideal: 1280 }, height: { ideal: 720 } },
+      });
+      if (this.qrScanModal !== modal) { stream.getTracks().forEach((track) => track.stop()); return; }
+      this.qrScanStream = stream;
+      video.srcObject = stream;
+      await video.play();
+      // Firefox/Safari and many mobile WebViews do not expose BarcodeDetector.
+      type Detector = { detect(source: HTMLVideoElement): Promise<{ rawValue: string }[]> };
+      const DetectorCtor = (window as unknown as {
+        BarcodeDetector?: new(options: { formats: string[] }) => Detector;
+      }).BarcodeDetector;
+      let detector: Detector | null = null;
+      try { if (DetectorCtor) detector = new DetectorCtor({ formats: ['qr_code'] }); } catch { /* use local decoder */ }
+      const canvas = document.createElement('canvas');
+      const context = canvas.getContext('2d', { willReadFrequently: true });
+      if (!context && !detector) throw new Error('Cannot read camera frames on this device');
+      status.textContent = 'Camera ready — searching for a Fluxa QR…';
+      let lastScan = 0;
+      let lastValue = '';
+      const scan = async (now: number): Promise<void> => {
+        if (this.qrScanModal !== modal) return;
+        if (now - lastScan >= 140 && video.readyState >= 2) {
+          lastScan = now;
+          let value: string | null = null;
+          if (detector) {
+            try { value = (await detector.detect(video))[0]?.rawValue ?? null; }
+            catch { detector = null; /* decode locally if the native API fails */ }
+          }
+          if (this.qrScanModal !== modal) return;
+          if (!value && context && video.videoWidth && video.videoHeight) {
+            const scale = Math.min(1, 960 / Math.max(video.videoWidth, video.videoHeight));
+            const width = Math.max(1, Math.round(video.videoWidth * scale));
+            const height = Math.max(1, Math.round(video.videoHeight * scale));
+            if (canvas.width !== width || canvas.height !== height) { canvas.width = width; canvas.height = height; }
+            context.drawImage(video, 0, 0, width, height);
+            const pixels = context.getImageData(0, 0, width, height);
+            // jsqr's CommonJS declaration is a namespace under NodeNext, but its runtime default is callable.
+            const decode = jsQR as unknown as (data: Uint8ClampedArray, w: number, h: number,
+              options: { inversionAttempts: 'attemptBoth' }) => { data: string } | null;
+            value = decode(pixels.data, width, height, { inversionAttempts: 'attemptBoth' })?.data ?? null;
+          }
+          if (value && value !== lastValue) {
+            lastValue = value;
+            const accepted = await this.consumeScannedQr(value);
+            if (this.qrScanModal !== modal) return;
+            if (accepted) { this.closeModal(modal); return; }
+            status.textContent = 'Not a valid Fluxa code for this connection. Try another QR, or enter it manually.';
+          }
+        }
+        if (this.qrScanModal === modal) this.qrScanFrame = requestAnimationFrame((time) => void scan(time));
+      };
+      this.qrScanFrame = requestAnimationFrame((time) => void scan(time));
+    } catch (err) {
+      if (this.qrScanModal !== modal) return;
+      this.qrScanStream?.getTracks().forEach((track) => track.stop());
+      this.qrScanStream = null;
+      status.textContent = 'Could not start this camera. Check browser permission, then enter the code manually or use Copy/Share.';
+      this.app.toast('error', `QR camera unavailable: ${(err as Error).message}`);
+    }
+  }
+
+  private stopQrScanner(): void {
+    if (this.qrScanFrame !== null) cancelAnimationFrame(this.qrScanFrame);
+    this.qrScanFrame = null;
+    this.qrScanStream?.getTracks().forEach((track) => track.stop());
+    this.qrScanStream = null;
+    this.qrScanModal = null;
+    const focus = this.qrScanReturnFocus;
+    this.qrScanReturnFocus = null;
+    if (focus?.isConnected) queueMicrotask(() => focus.focus());
+  }
+
+  /** Never follow arbitrary QR URLs. Interpret only a pairing code or full direct ticket. */
+  private async consumeScannedQr(rawValue: string): Promise<boolean> {
+    const value = rawValue.trim();
+    if (value.length > 8000) return false;
+    let code = value;
+    let isLink = false;
+    try {
+      const url = new URL(value);
+      if (['http:', 'https:', 'fluxa:'].includes(url.protocol)) {
+        code = url.searchParams.get('pair') ?? url.searchParams.get('code') ?? value;
+        isLink = true;
+      }
+    } catch { /* plain code or ticket */ }
+    if (/^[a-z0-9]{6}$/i.test(code)) {
+      const input = this.pairingModal?.querySelector<HTMLInputElement>('#join-code');
+      if (input) input.value = code.toUpperCase();
+      const ok = isLink ? this.app.joinPairingLink(value) : this.app.joinWithCode(code.toUpperCase());
+      if (ok && this.pairingModal) this.closeModal(this.pairingModal);
+      return ok;
+    }
+    if (value.replace(/\s+/g, '').startsWith('FLX1')) {
+      const direct = this.snapshot?.direct;
+      if (direct?.role === 'host' && direct.step === 'offer') {
+        const reply = this.pairingModal?.querySelector<HTMLTextAreaElement>('[data-testid="direct-reply-input"]');
+        if (reply) reply.value = value;
+        return this.app.completeDirectPairing(value);
+      }
+      this.pairingModal?.querySelector<HTMLElement>('[data-pair-tab="direct"]')?.click();
+      const input = this.pairingModal?.querySelector<HTMLTextAreaElement>('[data-testid="direct-join-input"]');
+      if (input) input.value = value;
+      return this.app.joinDirectPairing(value);
+    }
+    return false;
   }
 
   /** Copies text, falling back to the old execCommand path inside sandboxed WebViews. */
@@ -1269,11 +1696,18 @@ export class FluxaUI {
     }
     this.sawPairingCode = true;
     codeNode.classList.remove('is-pending');
-    if (qrWrap) qrWrap.hidden = false;
+    const payload = pairing.link ?? (snapshot.desktop ? null : `${location.origin}/?pair=${pairing.code}`);
+    if (qrWrap) qrWrap.hidden = !payload;
+    const unavailable = this.pairingModal.querySelector<HTMLElement>('#qr-unavailable');
+    if (unavailable) unavailable.hidden = Boolean(payload);
     codeNode.textContent = pairing.code.split('').join(' ');
-    if (!qrNode.dataset.code || qrNode.dataset.code !== pairing.code) {
-      qrNode.dataset.code = pairing.code;
-      qrNode.replaceChildren(this.renderQr(pairing.link ?? `${location.origin}/?pair=${pairing.code}`));
+    if (payload && qrNode.dataset.payload !== payload) {
+      qrNode.dataset.payload = payload;
+      qrNode.replaceChildren(this.renderQr(payload));
+      const hint = qrWrap?.querySelector('p');
+      if (hint) hint.textContent = payload.startsWith('fluxa:')
+        ? 'On the other device, open Fluxa and tap Scan QR. Both people still verify the code.'
+        : 'Open the link on the other device, then compare the verification codes.';
     }
   }
 
@@ -1466,7 +1900,10 @@ export class FluxaUI {
           )}"/>
           <button class="btn btn-ghost" type="submit" data-testid="save-signal-url">Save</button>
         </div>
-        <p class="muted tiny">The address of the Fluxa app (or server) that brokers pairing. Use this device's own address on desktop, or your computer's address from a phone.</p>
+        <p class="muted tiny">Both devices must reach the same pairing server. A phone cannot reach your computer's 127.0.0.1; enter a Wi-Fi/LAN address or a public wss:// server.</p>
+        ${this.snapshot?.desktop ? `<p class="muted tiny">This computer's LAN address${this.snapshot.desktop.lanUrls.length === 1 ? '' : 'es'}: ${this.snapshot.desktop.lanUrls.length
+          ? this.snapshot.desktop.lanUrls.map((url) => `<code>${esc(url)}</code>`).join(' · ')
+          : 'unavailable (broker is not listening on your LAN)'}</p>` : ''}
       </form>
       <form class="settings-form" id="turn-access-form">
         <label for="turn-access-input">Remote relay access key</label>

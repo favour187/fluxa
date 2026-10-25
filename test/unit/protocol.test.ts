@@ -59,6 +59,20 @@ test('chat control rejects malformed IDs, blank text, and oversized messages', (
   assert.throws(() => decodeFrame(encodeControl({ ...atLimit, text: emoji + '😀' })), /invalid chat control message/);
 });
 
+test('screen sharing controls and media offers require a bounded consent token', () => {
+  const id = '1'.repeat(32);
+  const request = { t: 'screenShare' as const, id, action: 'request' as const };
+  const offer = { t: 'screenSignal' as const, id, action: 'offer' as const, sdp: 'v=0\r\na=fingerprint:sha-256 AA:BB\r\n' };
+  assert.deepEqual(decodeFrame(encodeControl(request)), { kind: 'control', message: request });
+  assert.deepEqual(decodeFrame(encodeControl(offer)), { kind: 'control', message: offer });
+  for (const invalid of [
+    { ...request, id: 'not a consent token' },
+    { ...request, action: 'enable remote control' },
+    { ...offer, sdp: 'x'.repeat(65_537) },
+    { ...offer, id: 'bad' },
+  ]) assert.throws(() => decodeFrame(encodeControl(invalid as never)), /invalid screen/);
+});
+
 test('chunk frames round-trip with exact bytes', () => {
   const payload = new Uint8Array([0, 1, 2, 250, 251, 255]);
   const frame = encodeChunk(7, 123456, payload);

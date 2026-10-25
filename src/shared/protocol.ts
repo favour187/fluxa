@@ -86,6 +86,14 @@ export interface ResumeOffset {
 export interface ChatMessage { t: 'chat'; id: string; text: string; sentAt: number }
 export interface ChatAck { t: 'chatAck'; id: string; ok: boolean; receivedAt?: number; reason?: string }
 
+/** Live clipboard mirroring is never active without both peers opting in. */
+export interface ClipboardSyncControl { t: 'clipboardSync'; id: string; action: 'request' | 'accept' | 'decline' | 'stop'; reason?: string }
+export interface ClipboardUpdate { t: 'clipboardUpdate'; id: string; text: string; counter: number; origin: string }
+
+/** Screen pixels travel as DTLS-SRTP media; these are consent and SDP metadata only. */
+export interface ScreenShareControl { t: 'screenShare'; id: string; action: 'request' | 'accept' | 'decline' | 'stop'; reason?: string }
+export interface ScreenSignal { t: 'screenSignal'; id: string; action: 'offer' | 'answer'; sdp: string }
+
 export interface SharedContent {
   t: 'share';
   id: string;
@@ -119,6 +127,10 @@ export type ControlMessage =
   | { t: 'doneAck'; transferId: string; ok: boolean; error?: string }
   | ChatMessage
   | ChatAck
+  | ClipboardSyncControl
+  | ClipboardUpdate
+  | ScreenShareControl
+  | ScreenSignal
   | SharedContent
   | { t: 'shareResult'; id: string; ok: boolean; reason?: string }
   | { t: 'cancel'; transferId: string; reason: string }
@@ -205,7 +217,8 @@ export function decodeFrame(raw: ArrayBuffer | Uint8Array): DecodedFrame {
 
 const CONTROL_TYPES = new Set([
   'hello', 'helloAck', 'manifest', 'accept', 'decline', 'chunkAck', 'fileEnd',
-  'fileResult', 'done', 'doneAck', 'chat', 'chatAck', 'share', 'shareResult', 'cancel', 'error', 'ping', 'pong',
+  'fileResult', 'done', 'doneAck', 'chat', 'chatAck', 'clipboardSync', 'clipboardUpdate',
+  'screenShare', 'screenSignal', 'share', 'shareResult', 'cancel', 'error', 'ping', 'pong',
 ]);
 
 const transferId = (x: unknown): boolean => typeof x === 'string' && /^[0-9a-f]{32}$/.test(x);
@@ -261,6 +274,23 @@ export function assertControlMessage(value: unknown): ControlMessage {
       (msg['error'] === undefined || string(msg['error'], 512)); break;
     case 'chat': ok = transferId(msg['id']) && string(msg['text'], 4000) && new TextEncoder().encode(String(msg['text'] ?? '')).byteLength <= 4000 && String(msg['text'] ?? '').trim().length > 0 && Number.isSafeInteger(msg['sentAt']); break;
     case 'chatAck': ok = transferId(msg['id']) && typeof msg['ok'] === 'boolean' && (msg['receivedAt'] === undefined || Number.isSafeInteger(msg['receivedAt'])) && (msg['reason'] === undefined || string(msg['reason'], 256)); break;
+    case 'clipboardSync':
+      ok = transferId(msg['id']) && ['request', 'accept', 'decline', 'stop'].includes(String(msg['action'])) &&
+        (msg['reason'] === undefined || string(msg['reason'], 256));
+      break;
+    case 'clipboardUpdate':
+      ok = transferId(msg['id']) && string(msg['origin'], 80) &&
+        Number.isSafeInteger(msg['counter']) && Number(msg['counter']) > 0 && Number(msg['counter']) <= 1_000_000_000 &&
+        string(msg['text'], 16_384) && new TextEncoder().encode(String(msg['text'] ?? '')).byteLength <= 16_384;
+      break;
+    case 'screenShare':
+      ok = transferId(msg['id']) && ['request', 'accept', 'decline', 'stop'].includes(String(msg['action'])) &&
+        (msg['reason'] === undefined || string(msg['reason'], 256));
+      break;
+    case 'screenSignal':
+      ok = transferId(msg['id']) && ['offer', 'answer'].includes(String(msg['action'])) &&
+        string(msg['sdp'], 65_536) && String(msg['sdp']).length > 20;
+      break;
     case 'share': ok = validateSharedContent(msg).ok; break;
     case 'shareResult': ok = transferId(msg['id']) && typeof msg['ok'] === 'boolean' &&
       (msg['reason'] === undefined || string(msg['reason'], 512)); break;

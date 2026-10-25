@@ -13,11 +13,12 @@
  * narrow preload bridge, navigation locked to the local origin, and every
  * external link handed to the OS browser.
  */
-import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, screen, shell } from 'electron';
+import { app, BrowserWindow, clipboard, desktopCapturer, dialog, ipcMain, Menu, Notification, screen, session, shell } from 'electron';
 import { constants, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { createHash, randomBytes } from 'node:crypto';
 import { mkdir, open, link, copyFile, unlink } from 'node:fs/promises';
 import path from 'node:path';
+import { networkInterfaces } from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { Bonjour } from 'bonjour-service';
 import { startServer } from '../dist/server/index.js';
@@ -76,10 +77,15 @@ function savePreferences() {
 let mainWindow = null;
 let signalling = null;
 let localUrl = '';
+let serverAcceptsLan = false;
 let bonjour = null;
 let published = null;
 let nearby = new Map();
 const logLines = [];
+const pendingHandoffs = [];
+let handoffBridgeReady = false;
+/** No renderer gets ongoing OS clipboard access until the user enables sync. */
+const clipboardSyncAllowed = new Set();
 
 function log(...args) {
   const line = `${new Date().toISOString()} ${args.join(' ')}`;
@@ -110,7 +116,8 @@ async function startEmbeddedServer() {
     try {
       signalling = await attempt(port);
       localUrl = `http://127.0.0.1:${signalling.port}`;
-      log(`embedded signalling server listening on ${localUrl}`);
+      serverAcceptsLan = !forcedPort && port === 8787;
+      log(`embedded signalling server listening on ${localUrl}${serverAcceptsLan ? ' (LAN enabled)' : ' (this device only)'}`);
       return;
     } catch (err) {
       log(`port ${port} unavailable: ${err.message}`);
@@ -197,8 +204,45 @@ function broadcastNearby() {
 }
 
 /* ------------------------------------------------------------------ *
- * Window
+ * Window and explicit OS screen-picker consent
  * ------------------------------------------------------------------ */
+function installScreenPicker() {
+  session.defaultSession.setDisplayMediaRequestHandler(async (request, callback) => {
+    let answered = false;
+    const finish = (streams) => { if (!answered) { answered = true; callback(streams); } };
+    // Complete every request, even when denied/cancelled: leaving the callback
+    // unanswered can make getDisplayMedia hang and block another user attempt.
+    const decline = () => finish({});
+    try {
+      if (!mainWindow || mainWindow.isDestroyed() || !mainWindow.isFocused() || !request.userGesture ||
+          request.securityOrigin !== new URL(localUrl).origin || !request.videoRequested || request.audioRequested) return decline();
+      const sources = await desktopCapturer.getSources({
+        types: ['screen', 'window'], thumbnailSize: { width: 0, height: 0 },
+      });
+      if (!sources.length || !mainWindow || mainWindow.isDestroyed()) return decline();
+      let page = 0;
+      for (;;) {
+        const choices = sources.slice(page * 7, (page + 1) * 7);
+        const more = (page + 1) * 7 < sources.length;
+        const buttons = [...choices.map((source) => source.name.slice(0, 70)), ...(more ? ['More windows…'] : []), 'Cancel'];
+        const selection = await dialog.showMessageBox(mainWindow, {
+          type: 'question', title: 'Fluxa screen sharing',
+          message: 'Choose what to show to your verified device',
+          detail: 'Your selection is not sent until the other device also accepts. Audio and remote control are off.',
+          buttons, cancelId: buttons.length - 1, defaultId: buttons.length - 1, noLink: true,
+        });
+        if (!mainWindow || mainWindow.isDestroyed()) return decline();
+        if (selection.response < choices.length) {
+          const source = choices[selection.response];
+          return source ? finish({ video: source }) : decline();
+        }
+        if (!more || selection.response !== choices.length) return decline();
+        page++;
+      }
+    } catch (err) { log(`screen picker failed: ${err.message}`); decline(); }
+  }, { useSystemPicker: process.platform === 'darwin' });
+}
+
 function createWindow() {
   // Fit the window to the display instead of assuming a large screen: on a small
   // laptop a 1280×860 window opened taller than the screen, which is why the app
@@ -253,10 +297,18 @@ function createWindow() {
     if (/^https?:/.test(url)) void shell.openExternal(url);
     return { action: 'deny' };
   });
+  const windowId = mainWindow.webContents.id;
+  mainWindow.webContents.on('did-navigate', () => {
+    clipboardSyncAllowed.delete(windowId);
+    handoffBridgeReady = false;
+  });
   mainWindow.webContents.on('render-process-gone', (_event, details) => {
+    clipboardSyncAllowed.delete(windowId);
     log(`renderer gone: ${details.reason}`);
   });
   mainWindow.on('closed', () => {
+    clipboardSyncAllowed.delete(windowId);
+    handoffBridgeReady = false;
     mainWindow = null;
   });
 }
@@ -305,11 +357,26 @@ function buildMenu() {
 /* ------------------------------------------------------------------ *
  * IPC
  * ------------------------------------------------------------------ */
+function reachableLanUrls() {
+  if (!serverAcceptsLan || !signalling?.port) return [];
+  const ipv4 = /^(?:10\.|192\.168\.|172\.(?:1[6-9]|2\d|3[01])\.)/;
+  const entries = Object.entries(networkInterfaces()).flatMap(([name, addresses]) =>
+    (addresses ?? []).filter((entry) =>
+      (entry.family === 'IPv4' || entry.family === 4) && !entry.internal && ipv4.test(entry.address),
+    ).map((entry) => ({ name, address: entry.address })));
+  // Prefer a physical Wi-Fi/Ethernet adapter to a Docker/VPN bridge. Offer
+  // every candidate in Settings because the network route is operator-specific.
+  entries.sort((a, b) => Number(/^(?:docker|veth|br-|virbr|tun|tap)/i.test(a.name)) -
+    Number(/^(?:docker|veth|br-|virbr|tun|tap)/i.test(b.name)));
+  return [...new Set(entries.map(({ address }) => `http://${address}:${signalling.port}`))];
+}
+
 ipcMain.handle('desktop:info', () => ({
   version: app.getVersion(),
   platform: process.platform,
   arch: process.arch,
   localUrl,
+  lanUrls: reachableLanUrls(),
   serverPort: signalling?.port ?? null,
   signalUrl: externalSignalUrl || null,
   isPackaged: app.isPackaged,
@@ -332,6 +399,36 @@ ipcMain.handle('desktop:nearby-list', () => [...nearby.values()].filter((p) => p
 ipcMain.handle('desktop:notify', (_event, { title, body } = {}) => {
   if (!Notification.isSupported()) return { ok: false };
   new Notification({ title: String(title ?? 'Fluxa'), body: String(body ?? '') }).show();
+  return { ok: true };
+});
+
+const fromAppWindow = (event) => Boolean(mainWindow && !mainWindow.isDestroyed() && event.sender.id === mainWindow.webContents.id);
+ipcMain.handle('desktop:handoff-pending', (event) => {
+  if (!fromAppWindow(event)) return [];
+  handoffBridgeReady = true;
+  return pendingHandoffs.splice(0);
+});
+ipcMain.handle('desktop:clipboard-consent', (event, { enabled } = {}) => {
+  if (!fromAppWindow(event) || typeof enabled !== 'boolean') return { ok: false, error: 'Invalid clipboard request' };
+  if (enabled && !mainWindow.isFocused()) return { ok: false, error: 'Focus Fluxa to enable clipboard sync' };
+  if (enabled) clipboardSyncAllowed.add(event.sender.id);
+  else clipboardSyncAllowed.delete(event.sender.id);
+  return { ok: true };
+});
+ipcMain.handle('desktop:clipboard-read', (event) => {
+  if (!fromAppWindow(event) || !clipboardSyncAllowed.has(event.sender.id)) {
+    return { ok: false, error: 'Clipboard sync is not enabled in this Fluxa window' };
+  }
+  const text = clipboard.readText();
+  if (Buffer.byteLength(text, 'utf8') > 16_384) return { ok: false, error: 'Clipboard exceeds the 16 KiB sync limit' };
+  return { ok: true, text };
+});
+ipcMain.handle('desktop:clipboard-write', (event, { text } = {}) => {
+  if (!fromAppWindow(event) || !clipboardSyncAllowed.has(event.sender.id) ||
+      typeof text !== 'string' || Buffer.byteLength(text, 'utf8') > 16_384) {
+    return { ok: false, error: 'Clipboard sync is disabled or content exceeds its limit' };
+  }
+  clipboard.writeText(text);
   return { ok: true };
 });
 
@@ -453,23 +550,60 @@ ipcMain.handle('desktop:save-file', async (_event, { filePath, bytes } = {}) => 
 });
 
 /* ------------------------------------------------------------------ *
+ * Explicit, local-only browser handoff deep links
+ * ------------------------------------------------------------------ */
+function queueHandoff(raw) {
+  try {
+    if (raw.length > 5_000) return;
+    const link = new URL(raw);
+    if (link.protocol !== 'fluxa:' || link.host !== 'handoff') return;
+    const value = link.searchParams.get('url') ?? '';
+    const parsed = new URL(value);
+    if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password ||
+        parsed.href.length > 2048 || value.length > 2048) return;
+    const draft = { url: parsed.href, title: (link.searchParams.get('title') ?? '').replace(/[\x00-\x1f\x7f]/g, ' ').slice(0, 160) };
+    if (mainWindow && !mainWindow.isDestroyed() && handoffBridgeReady) mainWindow.webContents.send('desktop:handoff', draft);
+    else {
+      pendingHandoffs.push(draft);
+      if (pendingHandoffs.length > 5) pendingHandoffs.shift();
+    }
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      if (mainWindow.isMinimized()) mainWindow.restore();
+      mainWindow.focus();
+    }
+  } catch { /* never open external URLs or record contents */ }
+}
+
+/* ------------------------------------------------------------------ *
  * Lifecycle
  * ------------------------------------------------------------------ */
 const gotLock = app.requestSingleInstanceLock();
 if (!gotLock) {
   app.quit();
 } else {
-  app.on('second-instance', () => {
+  app.on('second-instance', (_event, argv) => {
+    for (const arg of argv) if (arg.startsWith('fluxa://handoff?')) queueHandoff(arg);
     if (mainWindow) {
       if (mainWindow.isMinimized()) mainWindow.restore();
       mainWindow.focus();
     }
   });
 
+  app.on('open-url', (event, url) => {
+    event.preventDefault();
+    queueHandoff(url);
+  });
+
   app.whenReady().then(async () => {
     try {
+      if (app.isPackaged) {
+        try { app.setAsDefaultProtocolClient('fluxa'); }
+        catch (err) { log(`OS protocol registration unavailable: ${err.message}`); }
+      }
       await startEmbeddedServer();
       createWindow();
+      for (const arg of process.argv) if (arg.startsWith('fluxa://handoff?')) queueHandoff(arg);
+      installScreenPicker();
       startDiscovery();
       buildMenu();
       if (headlessGuard) log('test mode');
