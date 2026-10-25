@@ -83,6 +83,9 @@ export interface ResumeOffset {
   prefixSha256: string;
 }
 
+export interface ChatMessage { t: 'chat'; id: string; text: string; sentAt: number }
+export interface ChatAck { t: 'chatAck'; id: string; ok: boolean; receivedAt?: number; reason?: string }
+
 export interface SharedContent {
   t: 'share';
   id: string;
@@ -114,6 +117,8 @@ export type ControlMessage =
   | { t: 'fileResult'; transferId: string; streamId: number; ok: boolean; sha256?: string; error?: string }
   | { t: 'done'; transferId: string }
   | { t: 'doneAck'; transferId: string; ok: boolean; error?: string }
+  | ChatMessage
+  | ChatAck
   | SharedContent
   | { t: 'shareResult'; id: string; ok: boolean; reason?: string }
   | { t: 'cancel'; transferId: string; reason: string }
@@ -200,7 +205,7 @@ export function decodeFrame(raw: ArrayBuffer | Uint8Array): DecodedFrame {
 
 const CONTROL_TYPES = new Set([
   'hello', 'helloAck', 'manifest', 'accept', 'decline', 'chunkAck', 'fileEnd',
-  'fileResult', 'done', 'doneAck', 'share', 'shareResult', 'cancel', 'error', 'ping', 'pong',
+  'fileResult', 'done', 'doneAck', 'chat', 'chatAck', 'share', 'shareResult', 'cancel', 'error', 'ping', 'pong',
 ]);
 
 const transferId = (x: unknown): boolean => typeof x === 'string' && /^[0-9a-f]{32}$/.test(x);
@@ -254,6 +259,8 @@ export function assertControlMessage(value: unknown): ControlMessage {
     case 'done': ok = transferId(msg['transferId']); break;
     case 'doneAck': ok = transferId(msg['transferId']) && typeof msg['ok'] === 'boolean' &&
       (msg['error'] === undefined || string(msg['error'], 512)); break;
+    case 'chat': ok = transferId(msg['id']) && string(msg['text'], 4000) && new TextEncoder().encode(String(msg['text'] ?? '')).byteLength <= 4000 && String(msg['text'] ?? '').trim().length > 0 && Number.isSafeInteger(msg['sentAt']); break;
+    case 'chatAck': ok = transferId(msg['id']) && typeof msg['ok'] === 'boolean' && (msg['receivedAt'] === undefined || Number.isSafeInteger(msg['receivedAt'])) && (msg['reason'] === undefined || string(msg['reason'], 256)); break;
     case 'share': ok = validateSharedContent(msg).ok; break;
     case 'shareResult': ok = transferId(msg['id']) && typeof msg['ok'] === 'boolean' &&
       (msg['reason'] === undefined || string(msg['reason'], 512)); break;

@@ -81,6 +81,8 @@ export interface TransferView {
   saveable: boolean;
 }
 
+export interface ChatEntry { id: string; deviceId: string; peerName: string; direction: 'sent' | 'received'; text: string; sentAt: number; status: 'sending' | 'delivered' | 'received' | 'failed' }
+
 export interface Toast {
   id: number;
   kind: 'info' | 'error' | 'success';
@@ -106,6 +108,7 @@ export interface AppSnapshot {
   direct: DirectView | null;
   incomingShares: ReceivedShare[];
   receivedShares: ReceivedShare[];
+  messages: ChatEntry[];
 }
 
 export interface DirectView {
@@ -173,6 +176,7 @@ export class FluxaApp {
   private history = new Map<string, HistoryEntry>();
   private pendingShares = new Map<string, ReceivedShare>();
   private receivedShares: ReceivedShare[] = [];
+  private messages: ChatEntry[] = [];
   private pendingPairing: PairingView | null = null;
   private incoming: { task: ReceiveTask } | null = null;
   private toasts: Toast[] = [];
@@ -374,6 +378,7 @@ export class FluxaApp {
       direct: this.direct,
       incomingShares: [...this.pendingShares.values()],
       receivedShares: [...this.receivedShares],
+      messages: [...this.messages].slice(-100),
     };
   }
 
@@ -552,7 +557,15 @@ export class FluxaApp {
           this.emit();
         },
         onControl: (msg) => {
-          if (msg.t === 'share' || msg.t === 'shareResult') box.entry?.shares?.handle(msg);
+          if (msg.t === 'chat') {
+            if (!this.messages.some((item) => item.id === msg.id && item.deviceId === peer.deviceId)) this.messages = [...this.messages, { id: msg.id, deviceId: peer.deviceId, peerName: peer.name, direction: 'received', text: msg.text, sentAt: msg.sentAt, status: 'received' }].slice(-100);
+            box.entry?.session.sendControl({ t: 'chatAck', id: msg.id, ok: true, receivedAt: Date.now() });
+            this.emit();
+          } else if (msg.t === 'chatAck') {
+            this.messages = this.messages.map((item) => item.id === msg.id && item.deviceId === peer.deviceId ? { ...item, status: msg.ok ? 'delivered' : 'failed' } : item);
+            if (!msg.ok) this.toast('error', msg.reason ?? 'Message was not delivered');
+            this.emit();
+          } else if (msg.t === 'share' || msg.t === 'shareResult') box.entry?.shares?.handle(msg);
           else box.entry?.manager?.handleControl(msg);
         },
         onChunk: (streamId, offset, data) => box.entry?.manager?.handleChunk(streamId, offset, data),
@@ -1006,6 +1019,17 @@ export class FluxaApp {
     if (!entry.manager) return;
     if (files.length === 0) return;
     entry.manager.send(files);
+    this.emit();
+  }
+
+  sendChatMessage(deviceId: string, text: string): void {
+    const clean = text.trim();
+    if (!clean || clean.length > 4000) { this.toast('error', 'Messages must be between 1 and 4,000 characters'); return; }
+    const entry = this.sessions.get(deviceId);
+    if (!entry?.session.verified || entry.session.state !== 'connected') { this.toast('error', 'Verify a connected device before messaging'); return; }
+    const id = randomToken(16), sentAt = Date.now();
+    this.messages = [...this.messages, { id, deviceId, peerName: entry.link.name, direction: 'sent', text: clean, sentAt, status: 'sending' }].slice(-100);
+    entry.session.sendControl({ t: 'chat', id, text: clean, sentAt });
     this.emit();
   }
 

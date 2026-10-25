@@ -112,6 +112,7 @@ export class FluxaUI {
   private transferRows = new Map<string, TransferRow>();
   private fileInput: HTMLInputElement;
   private folderInput: HTMLInputElement;
+  private stagedFiles: File[] = [];
 
   constructor(
     private readonly app: FluxaApp,
@@ -550,6 +551,45 @@ export class FluxaUI {
 
     stage.append(drop, buttons);
 
+    if (this.stagedFiles.length) {
+      const swipe = el('section', 'edge-send-card');
+      const summary = el('div');
+      summary.append(el('p', 'eyebrow', 'Ready to move'));
+      summary.append(el('strong', undefined, this.stagedFiles.length === 1 ? this.stagedFiles[0]!.name : this.stagedFiles.length + ' selected items'));
+      summary.append(el('p', 'muted tiny', 'Swipe this card to the right edge to send, or tap Send now.'));
+      const actions = el('div', 'edge-send-actions');
+      const clear = el('button', 'btn btn-ghost btn-xs', 'Clear'); clear.type = 'button';
+      clear.addEventListener('click', () => { this.stagedFiles = []; this.renderStage(this.snapshot!); });
+      const sendNow = el('button', 'btn btn-primary btn-sm', 'Send now'); sendNow.type = 'button';
+      sendNow.addEventListener('click', () => this.sendStaged());
+      actions.append(clear, sendNow); swipe.append(summary, actions);
+      let startX = 0, startY = 0;
+      swipe.addEventListener('pointerdown', (event) => { startX = event.clientX; startY = event.clientY; });
+      swipe.addEventListener('pointerup', (event) => {
+        if (event.clientX - startX > 90 && Math.abs(event.clientY - startY) < 70 && event.clientX >= window.innerWidth - 48) this.sendStaged();
+      });
+      swipe.tabIndex = 0; swipe.setAttribute('role', 'group');
+      swipe.setAttribute('aria-label', 'Swipe selected files to the right edge to send');
+      swipe.dataset.testid = 'edge-send-card';
+      stage.append(swipe);
+    }
+
+    const chat = el('section', 'chat-panel');
+    chat.setAttribute('aria-label', 'Messages with ' + session.name);
+    const head = el('div', 'chat-head'); head.append(el('h3', undefined, 'Quick messages'), el('span', 'muted tiny', 'Encrypted peer channel'));
+    const list = el('div', 'chat-messages'); list.setAttribute('aria-live', 'polite');
+    const messages = snapshot.messages.filter((m) => m.deviceId === session.deviceId);
+    if (!messages.length) list.append(el('p', 'muted small chat-empty', 'Message this device without leaving your transfer screen.'));
+    for (const m of messages.slice(-12)) {
+      const bubble = el('article', 'chat-bubble ' + m.direction); bubble.append(el('p', undefined, m.text));
+      bubble.append(el('span', 'chat-meta', new Date(m.sentAt).toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'}) + ' · ' + m.status)); list.append(bubble);
+    }
+    const form = el('form', 'chat-form'); const input = el('input', 'chat-input');
+    input.type = 'text'; input.maxLength = 4000; input.autocomplete = 'off'; input.placeholder = 'Write a message…'; input.setAttribute('aria-label', 'Message');
+    const send = el('button', 'btn btn-primary btn-sm', 'Send'); send.type = 'submit'; form.append(input, send);
+    form.addEventListener('submit', (event) => { event.preventDefault(); if (!input.value.trim()) return; this.app.sendChatMessage(session.deviceId, input.value); input.value = ''; });
+    chat.append(head, list, form); stage.append(chat);
+
     const note = el('p', 'small muted stage-note');
     note.textContent = snapshot.iceConfigured
       ? 'Encrypted peer-to-peer (DTLS). No file data passes through this server.'
@@ -564,9 +604,18 @@ export class FluxaUI {
 
   private onFilesPicked(list: FileList | null): void {
     if (!list) return;
-    this.send(Array.from(list));
+    this.stagedFiles = Array.from(list);
     this.fileInput.value = '';
     this.folderInput.value = '';
+    if (this.snapshot) this.renderStage(this.snapshot);
+  }
+
+  private sendStaged(): void {
+    if (!this.stagedFiles.length) return;
+    const files = this.stagedFiles;
+    this.stagedFiles = [];
+    this.send(files);
+    if (this.snapshot) this.renderStage(this.snapshot);
   }
 
   private renderTransfers(snapshot: AppSnapshot): void {
