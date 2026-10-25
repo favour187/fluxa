@@ -32,6 +32,10 @@ contextBridge.exposeInMainWorld('fluxaDesktop', {
   },
   notify: (title, body) => ipcRenderer.invoke('desktop:notify', { title, body }),
   saveDialog: (name) => ipcRenderer.invoke('desktop:save-dialog', { name }),
+  beginSave: (filePath, size) => ipcRenderer.invoke('desktop:save-begin', { filePath, size }),
+  writeSave: (token, offset, bytes) => ipcRenderer.invoke('desktop:save-chunk', { token, offset, bytes }),
+  commitSave: (token, sha256) => ipcRenderer.invoke('desktop:save-commit', { token, sha256 }),
+  abortSave: (token) => ipcRenderer.invoke('desktop:save-abort', token),
   saveFile: (filePath, bytes) => ipcRenderer.invoke('desktop:save-file', { filePath, bytes }),
   logLines: () => ipcRenderer.invoke('desktop:log-lines'),
 });

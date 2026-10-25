@@ -11,6 +11,8 @@
  * (separately configured) TURN relay; see docs/NETWORKING.md.
  */
 import http from 'node:http';
+import { timingSafeEqual } from 'node:crypto';
+import { turnConfigFromEnv, temporaryTurnServer, type TurnConfig } from './turn.js';
 import { createReadStream } from 'node:fs';
 import { stat } from 'node:fs/promises';
 import path from 'node:path';
@@ -26,6 +28,7 @@ import {
   verifySignature,
 } from '../shared/crypto.js';
 import { DEFAULT_CHUNK_SIZE, LIMITS, PROTOCOL_VERSION } from '../shared/protocol.js';
+import { isLocalNetworkHost } from '../shared/network.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const PUBLIC_DIR = path.resolve(__dirname, '../../public');
@@ -36,10 +39,14 @@ export interface ServerConfig {
   /** Public base URL used to build pairing links (e.g. https://fluxa.example). */
   publicUrl?: string;
   allowedOrigins?: string[];
+  /** Embedded desktop LAN broker only: permit another local Fluxa origin/port. */
+  allowLanOrigins?: boolean;
   pairingTtlMs?: number;
   heartbeatMs?: number;
   /** ICE servers handed to clients. Empty => host candidates only. */
   iceServers?: { urls: string | string[]; username?: string; credential?: string }[];
+  /** Optional coturn REST credentials issued ONLY after an authenticated hello. */
+  turn?: TurnConfig;
   log?: (line: string) => void;
 }
 
@@ -115,6 +122,15 @@ const SECURITY_HEADERS: Record<string, string> = {
 };
 
 export async function startServer(config: ServerConfig): Promise<FluxaServer> {
+  // Static TURN passwords in ready/config would be reusable by any visitor.
+  // Deploy with the short-lived REST credential issuer instead.
+  if (config.iceServers?.some((s) => s.credential || s.username)) {
+    throw new Error('Static ICE credentials are not supported; use FLUXA_TURN_URLS/SECRET/ACCESS_KEY');
+  }
+  if (config.turn && (config.turn.secret.length < 32 || config.turn.accessKey.length < 32 ||
+      config.turn.secret === config.turn.accessKey)) {
+    throw new Error('TURN requires independent REST secret and access key of at least 32 characters');
+  }
   const log = config.log ?? ((line: string) => console.log(`[fluxa] ${line}`));
   const pairing = new PairingStore(config.pairingTtlMs);
   const clients = new Map<string, Client>();
@@ -123,6 +139,7 @@ export async function startServer(config: ServerConfig): Promise<FluxaServer> {
   // Keyed per connection, not per IP: many devices legitimately share one NAT
   // address, and opening a TCP connection is itself the expensive step.
   const helloLimiter = new RateLimiter(4, 4 / 60);
+  const turnAccessLimiter = new RateLimiter(10, 1 / 60); // per-IP guess/backstop, distinct from pairing
   // Pairing is rate limited per authenticated device first (that is the unit an
   // attacker must control) with a much higher per-IP backstop, because whole
   // households/offices legitimately pair several devices from one NAT address.
@@ -147,7 +164,7 @@ export async function startServer(config: ServerConfig): Promise<FluxaServer> {
     };
 
     if (url.pathname === '/api/health') {
-      send(200, JSON.stringify({ ok: true, clients: clients.size }), MIME['.json']!);
+      send(200, JSON.stringify({ ok: true }), MIME['.json']!);
       return;
     }
     if (url.pathname === '/api/config') {
@@ -157,7 +174,9 @@ export async function startServer(config: ServerConfig): Promise<FluxaServer> {
           protocolVersion: PROTOCOL_VERSION,
           chunkSize: DEFAULT_CHUNK_SIZE,
           limits: LIMITS,
-          iceServers: config.iceServers ?? [],
+          // Do not expose static TURN passwords or mint temporary credentials
+          // for unauthenticated requests to the public config endpoint.
+          iceServers: (config.iceServers ?? []).filter((server) => !server.credential),
           publicUrl: config.publicUrl ?? null,
         }),
         MIME['.json']!,
@@ -212,8 +231,21 @@ export async function startServer(config: ServerConfig): Promise<FluxaServer> {
     verifyClient: (info: { req: http.IncomingMessage }) => {
       const origin = info.req.headers.origin;
       if (!origin) return true; // non-browser client (tests, native shells)
-      if (!config.allowedOrigins || config.allowedOrigins.length === 0) return true;
-      return config.allowedOrigins.includes(origin);
+      if (config.allowedOrigins?.includes(origin)) return true;
+      // Safe default: a public server does NOT implicitly accept arbitrary web
+      // origins. Native WebViews need an explicit allow-list entry.
+      try {
+        const parsed = new URL(origin);
+        const publicOrigin = config.publicUrl ? new URL(config.publicUrl).origin : null;
+        const host = new URL(`http://${info.req.headers.host}`).hostname;
+        return (parsed.host === info.req.headers.host &&
+          (isLocalNetworkHost(parsed.hostname) || origin === publicOrigin)) ||
+          // The desktop-embedded server brokers *two* local Electron instances
+          // with different origin ports/hosts. Never allow a public web origin
+          // or an untrusted Host header via this opt-in LAN-only path.
+          (config.allowLanOrigins === true && isLocalNetworkHost(host) &&
+            isLocalNetworkHost(parsed.hostname) && ['http:', 'https:'].includes(parsed.protocol));
+      } catch { return false; }
     },
   });
 
@@ -278,6 +310,8 @@ export async function startServer(config: ServerConfig): Promise<FluxaServer> {
     const type = String(msg['t'] ?? '');
 
     if (type === 'hello') {
+      if (msg['protocolVersion'] !== PROTOCOL_VERSION) return sendErr(client, 'incompatible_protocol', 'Update Fluxa: signalling protocol version mismatch');
+      if (client.authenticated || Date.now() - client.connectedAt > 30_000) return sendErr(client, 'bad_challenge', 'challenge expired or already used');
       if (!helloLimiter.take(client.connId)) return sendErr(client, 'rate_limited', 'too many attempts');
       const deviceId = String(msg['deviceId'] ?? '');
       const publicKey = String(msg['publicKey'] ?? '');
@@ -288,28 +322,39 @@ export async function startServer(config: ServerConfig): Promise<FluxaServer> {
       // Base64url SPKI for P-256 is 122 characters; allow headroom for other curves.
       if (!/^[A-Za-z0-9_-]{40,400}$/.test(publicKey)) return sendErr(client, 'bad_key', 'malformed public key');
       void (async () => {
-        const derived = await deriveDeviceId(publicKey);
-        if (derived !== deviceId) {
-          return sendErr(client, 'bad_identity', 'device id does not match public key');
+        try {
+          const derived = await deriveDeviceId(publicKey);
+          if (derived !== deviceId) return sendErr(client, 'bad_identity', 'device id does not match public key');
+          const ok = await verifySignature(publicKey, sig, `fluxa/1/signaling|${client.challenge}|${deviceId}`);
+          if (!ok) return sendErr(client, 'bad_signature', 'identity signature rejected');
+          if (client.authenticated) return sendErr(client, 'bad_challenge', 'challenge already consumed');
+          const computedFingerprint = await keyFingerprint(publicKey);
+          if (fingerprint && fingerprint !== computedFingerprint) {
+            return sendErr(client, 'bad_fingerprint', 'fingerprint does not match public key');
+          }
+          client.deviceId = deviceId;
+          client.publicKey = publicKey;
+          client.fingerprint = computedFingerprint;
+          client.name = sanitizeLabel(msg['name'], 'Unknown device');
+          client.platform = sanitizeLabel(msg['platform'], 'web');
+          client.authenticated = true;
+          const submitted = msg['turnAccessKey'];
+          const configuredKey = config.turn?.accessKey;
+          const turnGranted = Boolean(configuredKey && typeof submitted === 'string' &&
+            submitted.length <= 256 && turnAccessLimiter.take(client.ip) &&
+            Buffer.byteLength(submitted) === Buffer.byteLength(configuredKey) &&
+            timingSafeEqual(Buffer.from(submitted), Buffer.from(configuredKey)));
+          send(client, {
+            t: 'ready', connId: client.connId,
+            iceServers: [...(config.iceServers ?? []), ...(turnGranted ? [temporaryTurnServer(config.turn!)] : [])],
+            turnRequired: Boolean(config.turn) && !turnGranted,
+            protocolVersion: PROTOCOL_VERSION, limits: LIMITS, chunkSize: DEFAULT_CHUNK_SIZE,
+            publicUrl: config.publicUrl ?? null,
+          });
+          log(`hello ${client.connId} ${deviceId.slice(0, 8)} ${client.name} (${client.platform})`);
+        } catch {
+          sendErr(client, 'bad_key', 'invalid identity key');
         }
-        const ok = await verifySignature(publicKey, sig, `fluxa/1/signaling|${client.challenge}|${deviceId}`);
-        if (!ok) return sendErr(client, 'bad_signature', 'identity signature rejected');
-        client.deviceId = deviceId;
-        client.publicKey = publicKey;
-        client.fingerprint = fingerprint || await keyFingerprint(publicKey);
-        client.name = sanitizeLabel(msg['name'], 'Unknown device');
-        client.platform = sanitizeLabel(msg['platform'], 'web');
-        client.authenticated = true;
-        send(client, {
-          t: 'ready',
-          connId: client.connId,
-          iceServers: config.iceServers ?? [],
-          protocolVersion: PROTOCOL_VERSION,
-          limits: LIMITS,
-          chunkSize: DEFAULT_CHUNK_SIZE,
-          publicUrl: config.publicUrl ?? null,
-        });
-        log(`hello ${client.connId} ${deviceId.slice(0, 8)} ${client.name} (${client.platform})`);
       })();
       return;
     }
@@ -580,6 +625,7 @@ if (isMain) {
     publicUrl: process.env.FLUXA_PUBLIC_URL,
     allowedOrigins: process.env.FLUXA_ALLOWED_ORIGINS?.split(',').map((s) => s.trim()).filter(Boolean),
     iceServers: iceEnv ? (JSON.parse(iceEnv) as ServerConfig['iceServers']) : [],
+    turn: turnConfigFromEnv(process.env) ?? undefined,
   }).catch((err) => {
     console.error('failed to start fluxa server:', err);
     process.exit(1);

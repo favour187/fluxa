@@ -59,6 +59,18 @@ export class Sha256 {
     return this;
   }
 
+  /** Fork the incremental state to compute a prefix digest without losing the
+   * running hasher needed when more bytes arrive after reconnecting. */
+  clone(): Sha256 {
+    if (this.finished) throw new Error('Sha256: clone after digest');
+    const copy = new Sha256();
+    copy.h.set(this.h);
+    copy.buffer.set(this.buffer);
+    copy.bufferLength = this.bufferLength;
+    copy.bytesHashed = this.bytesHashed;
+    return copy;
+  }
+
   digestHex(): string {
     // finish() returns eight 32-bit words: each must be expanded to 8 hex digits,
     // otherwise words with a leading zero byte silently lose nibbles.

@@ -31,12 +31,12 @@ async function launch(port: number, signalUrl?: string): Promise<Instance> {
   if (signalUrl) args.push(`--fluxa-signal-url=${signalUrl}`);
   const app = await electron.launch({ args, cwd: APP_DIR });
   const page = await app.firstWindow();
+  const instance: Instance = { app, page, port, profile };
+  launched.push(instance); // also close a failed/partially started instance in afterEach
   await page.waitForFunction(() => Boolean((window as unknown as { __fluxa?: unknown }).__fluxa), null, {
     timeout: 60_000,
   });
   await expect(page.getByTestId('signal-status')).toHaveAttribute('data-state', 'online', { timeout: 30_000 });
-  const instance: Instance = { app, page, port, profile };
-  launched.push(instance);
   return instance;
 }
 
@@ -71,7 +71,8 @@ test('the packaged app starts, serves its UI and exposes a minimal bridge', asyn
   expect(sandbox.hasRequire).toBe(false);
   expect(sandbox.hasProcess).toBe(false);
   expect(sandbox.bridgeKeys).toEqual(
-    ['info', 'isDesktop', 'logLines', 'nearby', 'notify', 'onNearby', 'saveDialog', 'saveFile', 'setIdentity'].sort(),
+    ['info', 'isDesktop', 'logLines', 'nearby', 'notify', 'onNearby', 'saveDialog', 'saveFile', 'setIdentity',
+      'beginSave', 'writeSave', 'commitSave', 'abortSave'].sort(),
   );
 
   // Content-Security-Policy is served by the embedded server.
@@ -183,6 +184,13 @@ test('two desktop instances pair, verify and transfer a real file', async () => 
     .toBe(payload.byteLength);
   const written = await (await import('node:fs/promises')).readFile(savePath);
   expect(b64(written)).toBe(expected);
+
+  // A second user selection of the same name must not overwrite the first
+  // export. The IPC commit is exclusive, even if the native dialog returns an
+  // existing path and the renderer streams identical bytes again.
+  await b.page.getByTestId('save-received').first().click();
+  await expect(b.page.getByTestId('toast').filter({ hasText: /already exists/i }).first()).toBeVisible();
+  expect(b64(await (await import('node:fs/promises')).readFile(savePath))).toBe(expected);
 
   await rm(dir, { recursive: true, force: true });
 });

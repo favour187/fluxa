@@ -7,6 +7,7 @@
 import qrcode from 'qrcode-generator';
 import { formatBytes, formatDuration } from '../shared/protocol.js';
 import type { AppSnapshot, FluxaApp, SessionView, TransferView } from './app.js';
+import type { SharedContent } from '../shared/protocol.js';
 
 const el = <K extends keyof HTMLElementTagNameMap>(
   tag: K,
@@ -69,6 +70,7 @@ const stateLabel: Record<string, string> = {
   declined: 'Declined',
   cancelled: 'Cancelled',
   failed: 'Failed',
+  paused: 'Paused · resumable',
 };
 
 const sessionLabel: Record<string, string> = {
@@ -93,6 +95,7 @@ interface TransferRow {
   actions: HTMLElement;
   cancel: HTMLButtonElement;
   save: HTMLButtonElement;
+  resume: HTMLButtonElement;
 }
 
 export class FluxaUI {
@@ -207,7 +210,8 @@ export class FluxaUI {
     const activityPanel = el('aside', 'panel activity-panel');
     activityPanel.innerHTML = `
       <div class="panel-head"><div><h2>Activity</h2><p class="muted" id="activity-sub">Nothing transferred yet</p></div></div>
-      <ul class="transfer-list" id="transfer-list" data-testid="transfer-list"></ul>`;
+      <ul class="transfer-list" id="transfer-list" data-testid="transfer-list"></ul>
+      <div id="shared-section" class="shared-section" hidden><div class="panel-head"><h3>Shared with you</h3><button type="button" id="clear-shares" class="btn btn-ghost btn-xs">Clear</button></div><ul id="shared-items" class="shared-items"></ul></div>`;
 
     main.append(devicesPanel, stagePanel, activityPanel);
 
@@ -227,6 +231,7 @@ export class FluxaUI {
 
     this.q('#pair-btn').addEventListener('click', () => this.openPairing());
     this.q('#this-device').addEventListener('click', () => this.openSettings());
+    this.q('#clear-shares').addEventListener('click', () => this.app.clearReceivedShares());
   }
 
   private q<T extends HTMLElement = HTMLElement>(selector: string): T {
@@ -246,10 +251,12 @@ export class FluxaUI {
     this.renderNearby(snapshot);
     this.renderStage(snapshot);
     this.renderTransfers(snapshot);
+    this.renderReceivedShares(snapshot);
     this.syncPairingModal(snapshot);
     this.renderDirectPanel(snapshot);
     this.renderIncoming(snapshot);
     this.renderVerification(snapshot);
+    this.renderIncomingShare(snapshot);
     this.renderToasts(snapshot);
   }
 
@@ -450,9 +457,10 @@ export class FluxaUI {
     const h = el('h2', undefined, session.name);
     title.append(h);
     const metaLine = el('p', 'muted small');
-    metaLine.textContent = `${session.platform} · ${sessionLabel[session.state] ?? session.state}${
-      session.connection ? (session.connection.direct ? ' · direct path' : ' · relayed path') : ''
-    }`;
+    const route = session.connection ? (session.connection.type === 'host'
+      ? ' · local/direct (internet not needed on the same LAN)'
+      : session.connection.direct ? ' · direct via internet' : ' · TURN relay (internet needed)') : '';
+    metaLine.textContent = `${session.platform} · ${sessionLabel[session.state] ?? session.state}${route}`;
     title.append(metaLine);
     header.append(title);
 
@@ -504,6 +512,15 @@ export class FluxaUI {
     folder.dataset.testid = 'choose-folder';
     folder.addEventListener('click', () => this.folderInput.click());
     buttons.append(pick, folder);
+    for (const [kind, label] of [
+      ['clipboard', 'Share text / clipboard'], ['link', 'Share link'], ['session', 'Handoff work link'],
+    ] as [SharedContent['kind'], string][]) {
+      const button = el('button', 'btn btn-ghost', label);
+      button.type = 'button';
+      button.dataset.testid = `share-${kind}`;
+      button.addEventListener('click', () => this.openShareComposer(kind, session.deviceId));
+      buttons.append(button);
+    }
 
     drop.addEventListener('click', () => this.fileInput.click());
     drop.addEventListener('keydown', (e) => {
@@ -626,10 +643,28 @@ export class FluxaUI {
     save.type = 'button';
     save.dataset.testid = 'save-received';
     save.addEventListener('click', () => void this.app.saveReceived(transfer.id));
-    actions.append(cancel, save);
+    const resume = el('button', 'btn btn-primary btn-xs', 'Reselect to resume');
+    resume.type = 'button';
+    resume.dataset.testid = 'resume-transfer';
+    resume.addEventListener('click', () => {
+      const current = this.snapshot?.transfers.find((t) => t.id === transfer.id);
+      if (!current) return;
+      const input = el('input');
+      input.type = 'file';
+      input.multiple = true;
+      if (current.files.some((f) => f.relPath.includes('/'))) input.setAttribute('webkitdirectory', '');
+      input.addEventListener('change', () => {
+        if (input.files?.length) void this.app.resumeTransfer(transfer.id, Array.from(input.files));
+        input.remove();
+      }, { once: true });
+      input.hidden = true;
+      this.root.append(input);
+      input.click();
+    });
+    actions.append(cancel, save, resume);
 
     node.append(head, bar, stats, error, actions);
-    return { node, primary, detail, stateTag, bar, fill, stats, error, actions, cancel, save };
+    return { node, primary, detail, stateTag, bar, fill, stats, error, actions, cancel, save, resume };
   }
 
   private updateTransferRow(row: TransferRow, transfer: TransferView): void {
@@ -674,9 +709,123 @@ export class FluxaUI {
 
     const cancellable = ['preparing', 'waiting-approval', 'transferring', 'incoming'].includes(transfer.state);
     const saveable = transfer.state === 'complete' && transfer.role === 'receive' && transfer.saveable;
+    const resumable = transfer.state === 'paused' && transfer.role === 'send';
     this.toggleAction(row.actions, row.cancel, cancellable);
     this.toggleAction(row.actions, row.save, saveable);
-    row.actions.hidden = !cancellable && !saveable;
+    this.toggleAction(row.actions, row.resume, resumable);
+    row.actions.hidden = !cancellable && !saveable && !resumable;
+  }
+
+  /** No passive clipboard access: this is only called from a visible button. */
+  private openShareComposer(kind: SharedContent['kind'], deviceId: string): void {
+    const overlay = this.openOverlay();
+    const modal = el('div', 'modal modal-share');
+    modal.setAttribute('role', 'dialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-label', 'Share with paired device');
+    modal.dataset.testid = 'share-composer';
+    const heading = kind === 'clipboard' ? 'Share text / clipboard' : kind === 'link' ? 'Share a link' : 'Handoff a work link';
+    modal.innerHTML = `<button type="button" class="modal-close" aria-label="Close">×</button>
+      <h2>${heading}</h2>
+      <p class="muted small">Only what you enter here is sent. Never paste passwords, tokens, cookies or private app data. The other device must approve it.</p>
+      ${kind === 'clipboard' ? '' : '<label for="shared-url">HTTP(S) URL</label><input id="shared-url" type="url" placeholder="https://example.com" data-testid="shared-url" />'}
+      ${kind === 'session' ? '<label for="shared-title">Title</label><input id="shared-title" maxlength="256" placeholder="Continue reading" data-testid="shared-title" />' : ''}
+      <label for="shared-text">${kind === 'clipboard' ? 'Text to share' : 'Note (optional)'}</label>
+      <textarea id="shared-text" rows="4" maxlength="16000" data-testid="shared-text"></textarea>
+      ${kind === 'clipboard' ? '<button type="button" class="btn btn-ghost btn-xs" id="paste-clipboard">Paste clipboard (permission required)</button>' : ''}
+      <div class="modal-actions"><button type="button" class="btn btn-ghost" id="share-cancel">Cancel</button>
+      <button type="button" class="btn btn-primary" id="share-send" data-testid="send-shared">Request approval</button></div>`;
+    modal.querySelector('.modal-close')!.addEventListener('click', () => this.closeModal(modal));
+    modal.querySelector('#share-cancel')!.addEventListener('click', () => this.closeModal(modal));
+    modal.querySelector('#paste-clipboard')?.addEventListener('click', () => {
+      void navigator.clipboard.readText().then((text) => {
+        modal.querySelector<HTMLTextAreaElement>('#shared-text')!.value = text.slice(0, 16000);
+      }).catch(() => this.app.toast('error', 'Clipboard access denied; paste text manually'));
+    });
+    modal.querySelector('#share-send')!.addEventListener('click', () => {
+      const text = modal.querySelector<HTMLTextAreaElement>('#shared-text')!.value;
+      const url = modal.querySelector<HTMLInputElement>('#shared-url')?.value.trim();
+      const title = modal.querySelector<HTMLInputElement>('#shared-title')?.value.trim();
+      if (kind === 'clipboard' && !text) { this.app.toast('error', 'Enter or paste some text first'); return; }
+      if (kind !== 'clipboard') {
+        try {
+          const parsed = new URL(url ?? '');
+          if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) throw Error();
+        } catch { this.app.toast('error', 'Only HTTP(S) links without embedded credentials are allowed'); return; }
+      }
+      this.app.sendSharedContent(deviceId, kind, text, url, title);
+      this.closeModal(modal);
+    });
+    overlay.append(modal);
+    (modal.querySelector<HTMLInputElement>('#shared-url') ?? modal.querySelector<HTMLTextAreaElement>('#shared-text'))?.focus();
+  }
+
+  private renderIncomingShare(snapshot: AppSnapshot): void {
+    const overlay = this.q('#overlay');
+    const existing = overlay.querySelector<HTMLElement>('[data-testid="shared-approval"]');
+    const pending = snapshot.incomingShares[0];
+    if (!pending) {
+      if (existing) this.closeModal(existing);
+      return;
+    }
+    if (existing?.dataset.id === pending.id) return;
+    if (existing) this.closeModal(existing);
+    // A file-transfer or SAS dialog has priority. No automatic acceptance.
+    if (snapshot.incoming || snapshot.verification || overlay.querySelector('.modal')) return;
+    overlay.classList.add('active');
+    const modal = el('div', 'modal modal-share');
+    modal.dataset.testid = 'shared-approval';
+    modal.dataset.id = pending.id;
+    modal.setAttribute('role', 'alertdialog');
+    modal.setAttribute('aria-modal', 'true');
+    modal.setAttribute('aria-label', 'Incoming shared content');
+    modal.append(el('h2', undefined, `Shared ${pending.kind} from ${pending.peerName}`));
+    modal.append(el('p', 'muted small', 'Nothing is copied or opened until you approve, then choose an action.'));
+    if (pending.url) modal.append(el('p', 'share-preview', pending.url));
+    if (pending.title) modal.append(el('p', 'share-preview', pending.title));
+    if (pending.text) modal.append(el('p', 'share-preview', pending.text.slice(0, 500)));
+    const actions = el('div', 'modal-actions');
+    const decline = el('button', 'btn btn-ghost', 'Decline');
+    decline.type = 'button';
+    decline.dataset.testid = 'decline-shared';
+    decline.addEventListener('click', () => { this.app.approveSharedContent(pending.id, false); this.closeModal(modal); });
+    const approve = el('button', 'btn btn-primary', 'Approve');
+    approve.type = 'button';
+    approve.dataset.testid = 'accept-shared';
+    approve.addEventListener('click', () => { this.app.approveSharedContent(pending.id, true); this.closeModal(modal); });
+    actions.append(decline, approve);
+    modal.append(actions);
+    overlay.append(modal);
+    approve.focus();
+  }
+
+  private renderReceivedShares(snapshot: AppSnapshot): void {
+    const section = this.q('#shared-section');
+    section.hidden = snapshot.receivedShares.length === 0;
+    const list = this.q('#shared-items');
+    list.replaceChildren();
+    for (const item of snapshot.receivedShares) {
+      const row = el('li', 'shared-item');
+      row.append(el('strong', undefined, item.title || (item.kind === 'clipboard' ? 'Text from ' + item.peerName : 'Link from ' + item.peerName)));
+      row.append(el('p', 'muted tiny', item.url || item.text.slice(0, 220)));
+      if (item.kind === 'session' && item.text) row.append(el('p', 'share-preview', item.text.slice(0, 220)));
+      const actions = el('div', 'transfer-actions');
+      const copy = el('button', 'btn btn-ghost btn-xs', 'Copy');
+      copy.type = 'button';
+      copy.dataset.testid = 'copy-shared';
+      copy.addEventListener('click', () => void this.copyText(item.url || item.text));
+      actions.append(copy);
+      if (item.url) {
+        const open = el('a', 'btn btn-ghost btn-xs', 'Open link');
+        open.href = item.url;
+        open.target = '_blank';
+        open.rel = 'noopener noreferrer';
+        open.dataset.testid = 'open-shared';
+        actions.append(open);
+      }
+      row.append(actions);
+      list.append(row);
+    }
   }
 
   /* ---------------------------------------------------------------- */
@@ -696,7 +845,7 @@ export class FluxaUI {
   private onOverlayKeydown(event: KeyboardEvent): void {
     if (event.key !== 'Escape') return;
     // An incoming transfer needs an explicit decision, so Escape never dismisses it.
-    if (this.q('#overlay').querySelector('[data-testid="incoming-modal"]')) return;
+    if (this.q('#overlay').querySelector('[data-testid="incoming-modal"], [data-testid="shared-approval"]')) return;
     event.preventDefault();
     const open = this.q('#overlay').querySelector<HTMLElement>('.modal');
     if (!open) return;
@@ -723,6 +872,7 @@ export class FluxaUI {
     if (!overlay.querySelector('.modal')) {
       overlay.classList.remove('active');
       overlay.replaceChildren();
+      if (this.snapshot?.incomingShares.length) queueMicrotask(() => this.renderIncomingShare(this.app.snapshot()));
     }
   }
 
@@ -1133,7 +1283,7 @@ export class FluxaUI {
     list.dataset.testid = 'incoming-files';
     for (const file of transfer.files.slice(0, 6)) {
       const li = el('li');
-      li.append(el('span', 'file-name', file.name), el('span', 'muted small', formatBytes(file.size)));
+      li.append(el('span', 'file-name', file.relPath), el('span', 'muted small', formatBytes(file.size)));
       list.append(li);
     }
     if (transfer.files.length > 6) list.append(el('li', 'muted small', `+${transfer.files.length - 6} more`));
@@ -1193,12 +1343,24 @@ export class FluxaUI {
         </div>
         <p class="muted tiny">The address of the Fluxa app (or server) that brokers pairing. Use this device's own address on desktop, or your computer's address from a phone.</p>
       </form>
+      <form class="settings-form" id="turn-access-form">
+        <label for="turn-access-input">Remote relay access key</label>
+        <div class="inline">
+          <input id="turn-access-input" type="password" autocomplete="off" maxlength="128"
+            placeholder="${this.app.hasTurnAccessKey() ? 'Key saved on this device' : 'Paste the operator-issued key'}" data-testid="turn-access-input"/>
+          <button class="btn btn-ghost" type="submit" data-testid="save-turn-access">Save key</button>
+          <button class="btn btn-ghost" type="button" id="clear-turn-access">Clear</button>
+        </div>
+        <p class="muted tiny">Only sent over wss:// to a server that requires it. Never place this key in a pairing link; re-pair after changing it.</p>
+      </form>
       <label class="switch-row">
         <input type="checkbox" id="reduce-motion" data-testid="reduce-motion" ${document.documentElement.dataset.reducedMotion === 'true' ? 'checked' : ''}/>
         <span>Reduce motion (disables ambient and progress animations)</span>
       </label>
       <div class="modal-actions column-actions">
-        <button class="btn btn-ghost" id="clear-received" type="button">Clear received files stored by this browser</button>
+        <button class="btn btn-ghost" id="clear-received" type="button">Delete received and partial files on this device</button>
+        <button class="btn btn-ghost" id="clear-history" type="button">Clear transfer history</button>
+        <p class="muted tiny">Transfers are only resumable while private storage persists. Restart requires re-pairing, approving again, and reselecting the original source files. Clearing files removes recovery data.</p>
       </div>`;
     modal.querySelector('.modal-close')!.addEventListener('click', () => this.closeOverlay());
     const form = modal.querySelector<HTMLFormElement>('#name-form')!;
@@ -1209,14 +1371,32 @@ export class FluxaUI {
       this.closeOverlay();
     });
     modal.querySelector('#clear-received')!.addEventListener('click', () => {
-      void this.app.clearReceivedStorage();
-      this.closeOverlay();
+      if (confirm('Delete all received and partial files from this device? Interrupted transfers cannot resume.')) {
+        void this.app.clearReceivedStorage();
+        this.closeOverlay();
+      }
+    });
+    modal.querySelector('#clear-history')!.addEventListener('click', () => {
+      if (confirm('Clear the transfer history on this device?')) {
+        void this.app.clearTransferHistory();
+        this.closeOverlay();
+      }
     });
     const signalForm = modal.querySelector<HTMLFormElement>('#signal-form')!;
     signalForm.addEventListener('submit', (event) => {
       event.preventDefault();
       const input = modal.querySelector<HTMLInputElement>('#signal-url')!;
       if (this.app.setSignalUrl(input.value)) this.closeOverlay();
+    });
+
+    modal.querySelector<HTMLFormElement>('#turn-access-form')!.addEventListener('submit', (event) => {
+      event.preventDefault();
+      const input = modal.querySelector<HTMLInputElement>('#turn-access-input')!;
+      if (!input.value) { this.app.toast('error', 'Paste a key, or use Clear to remove the existing key'); return; }
+      if (this.app.setTurnAccessKey(input.value)) this.closeOverlay();
+    });
+    modal.querySelector('#clear-turn-access')!.addEventListener('click', () => {
+      if (this.app.setTurnAccessKey('')) this.closeOverlay();
     });
 
     const reduceMotion = modal.querySelector<HTMLInputElement>('#reduce-motion')!;

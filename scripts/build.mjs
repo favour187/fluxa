@@ -3,7 +3,7 @@
 //  2. bundles the signalling server -> dist/server/index.js
 //  3. transpiles src/** and test/** -> dist/** (ESM, no bundling) so `node --test` can run them
 import { build } from 'esbuild';
-import { mkdir, copyFile, rm } from 'node:fs/promises';
+import { mkdir, copyFile, rm, readFile } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -22,7 +22,8 @@ async function main() {
   await rm(path.join(root, 'dist'), { recursive: true, force: true });
   await mkdir(path.join(root, 'public'), { recursive: true });
 
-  // 1. client bundle
+  // 1. client bundle — one source of truth for the visible/web version too.
+  const version = JSON.parse(await readFile(path.join(root, 'package.json'), 'utf8')).version;
   await build({
     ...common,
     entryPoints: [path.join(root, 'src/client/main.ts')],
@@ -31,7 +32,7 @@ async function main() {
     platform: 'browser',
     target: ['chrome120', 'firefox121', 'safari17'],
     minify: false,
-    define: { 'process.env.NODE_ENV': '"production"' },
+    define: { 'process.env.NODE_ENV': '"production"', FLUXA_VERSION: JSON.stringify(version) },
   });
 
   // 2. server bundle (ws stays external: it is a CJS package with optional native deps)

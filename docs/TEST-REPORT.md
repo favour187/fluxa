@@ -1,355 +1,127 @@
-# Fluxa — verification report
+# Fluxa 0.2.0 — verification and release-readiness record
 
-Date of record: **2026-10-24**. Everything below was executed in this repository on
-that date. Nothing is claimed that was not run.
+**Date:** 2026-10-25. **Working branch:** `work/universal-transfer`, based on
+`origin/main` at `e58c3ffc56a29d058a037bc6908d2529b6e61d70`.
+At the time of this record, the new work has **not** been built by CircleCI,
+installed on a phone or published. Package version remains **0.2.0**; the
+incompatible transfer/signalling protocol is **v2**. Read this alongside
+[PLATFORM-NOTES.md](PLATFORM-NOTES.md), [NETWORKING.md](NETWORKING.md), and
+[RELEASE.md](RELEASE.md).
 
-## TL;DR
+## Actual local commands and results
 
-| Command | Result |
-|---|---|
-| `npm run check` (`tsc --noEmit`, strict) | ✅ exit 0, no errors |
-| `npm test` (build + `node --test`) | ✅ **60 / 60 passing**, 1.3 s |
-| `npm run test:e2e` (Playwright, 2 browser contexts) | ✅ **12 / 12 passing**, ~1.5 min |
-| `npm audit --omit=dev` | ✅ `found 0 vulnerabilities` |
-| `npm audit` (dev included) | ✅ `found 0 vulnerabilities` |
-
-Two real browsers, real WebRTC, real files; SHA-256 compared on every transfer.
-
----
-
-## 1. Repository state
-
-There was **no pre-existing Fluxa repository**: the workspace was empty. This
-project was therefore created from scratch as a complete, runnable application
-(browser client + signalling server + transfer engine + tests), not as a rewrite of
-anything.
-
-## 2. Files
-
-```
-package.json  tsconfig.json  playwright.config.ts  .env.example  .gitignore  LICENSE
-scripts/build.mjs                     esbuild pipeline (client bundle, server bundle, test transpile)
-
-src/shared/protocol.ts                wire format, limits, manifest validation
-src/shared/crypto.ts                  identity, signatures, ECDH, SAS derivation
-src/shared/filename.ts                filename / relative-path sanitisation
-
-src/server/index.ts                   HTTP static host + WebSocket signalling
-src/server/pairing.ts                 short-lived single-use pairing codes
-src/server/ratelimit.ts               token-bucket limiter
-
-src/client/main.ts                    bootstrap + read-only debug surface
-src/client/app.ts                     application state, sessions, devices, transfers
-src/client/ui.ts                      DOM rendering (no framework)
-src/client/index.html  styles.css     app shell + design system
-src/client/identity.ts                device identity (IndexedDB, non-extractable key) + trust store
-src/client/signal.ts                  signalling client (hello signature, codes, relay)
-src/client/peer.ts                    WebRTC session, identity pinning, DTLS binding, SAS
-src/client/sha256.ts                  incremental SHA-256 (WebCrypto has no streaming digest)
-src/client/transfer/manager.ts        routing, one-transfer-at-a-time rules
-src/client/transfer/sender.ts         streaming sender with ack window + backpressure
-src/client/transfer/receiver.ts       ordered writes, incremental hashing, finalisation
-src/client/transfer/sink.ts           MemorySink + OPFS sink + storage checks
-src/client/transfer/types.ts          shared transfer state types
-
-test/unit/protocol.test.ts            frame codec, malformed frames, manifest validation
-test/unit/filename.test.ts            traversal, reserved names, unicode, dedupe
-test/unit/sha256.test.ts              vectors + parity with node:crypto
-test/unit/crypto.test.ts              identity, signatures, ECDH, SAS transcript
-test/unit/pairing.test.ts             TTL, single use, attempts, rate limiter
-test/unit/signaling.test.ts           real WebSocket server: auth, pairing, relay rules
-test/unit/transfer.test.ts            engine: corruption, ordering, cancel, disconnect, busy
-
-e2e/helpers.ts  e2e/transfer.spec.ts  two-browser end-to-end suite
-
-docs/ARCHITECTURE.md  SECURITY.md  NETWORKING.md  PLATFORM-NOTES.md  TEST-REPORT.md
-```
-
-## 3. Bugs found and fixed during verification
-
-These were found by the tests written here, i.e. real defects, not test scaffolding.
-
-| # | Symptom | Root cause | Fix |
-|---|---|---|---|
-| 1 | Integrity hashes occasionally wrong (63 hex digits, wrong digest) for certain inputs | `Sha256.digestHex()` iterated *32-bit words* with 2-digit padding, dropping leading zero nibbles | Emit 8 hex digits per word (`src/client/sha256.ts`); caught by parity tests against `node:crypto` at sizes 0…65 537 |
-| 2 | `Sha256` threw `update after digest` on the padding block | `finished` flag set before the padding update | Set the flag after padding (`src/client/sha256.ts`) |
-| 3 | Every pairing after the 10th from one IP failed | hello rate limit keyed per IP; NAT/multi-device deployments burned the bucket | Limit per WebSocket connection (4/min), since the challenge is per connection |
-| 4 | All WebSocket `hello`s rejected with `bad_key` | Public-key regex capped at 88 chars; P-256 SPKI base64url is 122 | Corrected bound (`src/server/index.ts`) |
-| 5 | Trusted devices never persisted; "no devices yet" after a successful verification | `IDBObjectStore.put(value, key)` throws `DataError` when the store has a key path | Only pass an explicit key for out-of-line stores (`src/client/identity.ts`) |
-| 6 | Verification dialog vanished immediately after pairing | Closing the pairing dialog in the same render pass also removed the newly opened verification dialog | `closeModal()` closes exactly one dialog; render order fixed (`src/client/ui.ts`) |
-| 7 | Second device's pairing dialog never closed, blocking the whole UI with an invisible overlay | The claimant never had a `pairing` object, so the "code consumed" path never ran | Close the dialog on successful claim; errors surface as toasts |
-| 8 | Multi-file transfers failed after the first file | Receiver switched to `verifying` per file, then rejected the next file's chunks as "outside an active transfer" | Stay `transferring` until the last stream is finalised (`src/client/transfer/receiver.ts`) |
-| 9 | Fast/small transfers reported **0 bytes** of progress until completion | Receiver only acked at 256 KiB boundaries; small transfers finished first | 100 ms ack timer + final ack on `fileEnd` (`receiver.ts`) |
-| 10 | Cancel button un-clickable during transfers | Activity list was rebuilt on every progress frame, detaching elements under the pointer | Rows built once and patched in place; progress emissions coalesced to one per animation frame (`ui.ts`, `app.ts`) |
-| 11 | Sender could "send" into a dead session | `verified` stayed true after the peer disconnected | Sending requires `state === 'connected'`; the stage shows "Connection unavailable" |
-| 12 | Unverified peer invisible in the device list after deferring verification | Device list only contained trusted devices | List trusted devices *plus* live unverified sessions, badged "Not verified", with a Verify action |
-| 13 | Sender's transfer state was `failed` instead of `declined` when the receiver pressed Decline | Decline path reused the generic failure path | Explicit `declined` state (`sender.ts`) |
-| 14 | Device rename was not visible to the peer | Name was only sent in the initial `hello` | `profile` signalling message + server update (`signal.ts`, `server/index.ts`) |
-| 15 | Tests left timers alive, hanging the suite for 95 s | Sender kept looping after failure and scheduling waiters | Abort guard in the send loop, reader cancellation, `done` checks in waiters |
-
-Additionally, a UX/a11y fix: the device row was an `li[role=button]` containing a
-`button` (invalid nesting); it is now a real `button` plus a sibling remove control,
-and keyboard operable.
-
-## 4. Browser tests (Playwright, Chromium)
-
-Each test creates **two independent browser contexts** (separate storage, separate
-identities) and performs the entire real flow: signalling connection, pairing code,
-WebRTC negotiation, 6-digit verification compared on both screens, transfer,
-accept/reject, and hash comparison.
-
-| # | Test | What it proves | Time |
-|---|---|---|---|
-| 1 | empty file (0 B) | zero-byte stream finalises and verifies | 5.7 s |
-| 2 | small text file (41 B) | smallest non-trivial path | 5.8 s |
-| 3 | binary file (512 KiB) | binary framing, multi-chunk | 5.7 s |
-| 4 | larger file (8 MiB) | sustained throughput, ack window | 8.6 s |
-| 5 | 32 MiB file streamed to disk | OPFS sink; **receiver JS heap grew 2.5 MB** (< 24 MB asserted) | 8.5 s |
-| 6 | batch of 3 files (9 B, 70 000 B, 7 B) | ordering, per-file verification, multi-file `done` | 4.7 s |
-| 7 | decline | sender lands in `declined`, receiver exposes no save control, nothing completed | 5.0 s |
-| 8 | cancel mid-transfer (24 MiB) | both sides end `cancelled`, no file exposed, no save control | 12.8 s |
-| 9 | second send during a transfer | queued, not run in parallel (exactly one `transferring`/`incoming`) | 11.8 s |
-| 10 | progress before verification | state sequence includes `complete` only after hashing; digest matches source | 8.1 s |
-| 11 | unverified peer | no drop-zone exists; deferral works; rejecting closes the session and surfaces a toast | 7.1 s |
-| 12 | peer disconnects | badge clears, toast shown, no drop-zone remains | 5.2 s |
-
-### File sizes and SHA-256 results
-
-Deterministic fixtures (hash computed twice: from the source bytes in Node, and by
-the receiver over the bytes it actually received):
-
-| File | Size | SHA-256 | Sender hash = receiver hash = saved-file hash |
-|---|---|---|---|
-| `empty.txt` | 0 B | `e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855` | ✅ |
-| `notes.txt` | 41 B | `3b6256f156cbd74c86c6adb9b4f6137ed901a0a16aff63657026d4fef60859f9` | ✅ |
-| `one.txt` | 5 B | `a7937b64b8caa58f03721bb6bacf5c78cb235febe0e70b1b84cd99541461a08e` | ✅ |
-| `three.md` | 7 B | `f4c39d0dbc56eed05655b946e8408c0104a9097d43c8633e1d86cd304a5337db` | ✅ |
-
-Random fixtures (fresh bytes per run, compared programmatically rather than
-listed): `blob.bin` 512 KiB, `video-sample.mp4` 8 MiB, `large-video.mp4` 32 MiB,
-`big-cancel.bin` 24 MiB, `busy.bin` 16 MiB, `two.bin` 70 000 B. For every one, the
-test asserted:
-
-1. `receiver-reported sha256 === sha256(source bytes)` computed in Node,
-2. `sha256(bytes read back from the browser download) === sha256(source bytes)`,
-3. `received size === source size`,
-4. both sides' transfer state reached `complete` only after that.
-
-Because the digest for a 32 MiB file is checked over the bytes the *browser* wrote
-to disk, a corrupted or truncated write cannot pass.
-
-## 5. Protocol / engine tests (`node --test`)
-
-60 tests across 7 files (1.3 s). Highlights:
-
-* **Framing**: control and chunk round-trips, byte-exact payloads, `Uint8Array`
-  views with non-zero offsets, and rejection of bad magic, bad length, bad JSON,
-  unknown types, oversized chunks and negative offsets.
-* **SHA-256**: known vectors plus parity with `node:crypto` at 13 boundary sizes and
-  irregular incremental chunking; digest reuse throws.
-* **Filename safety**: `../../etc/passwd`, Windows separators, NUL/control bytes,
-  reserved device names (`CON`, `LPT1`), trailing dots/spaces, 200-character
-  unicode truncation without splitting code points, path-depth limit, dedupe.
-* **Manifest validation**: traversal, duplicate `streamId`, duplicate paths,
-  negative size, wrong `totalBytes`, empty manifest, wrong protocol version.
-* **Pairing store**: single use, case/format tolerance, TTL expiry, one code per
-  device, self-claim refused, cancel, sweep, rate-limiter refill/isolation.
-* **Signalling server over real sockets**: hello without proof is refused; forged
-  signature, mismatched device id and replayed challenge are refused; valid hello
-  returns negotiated config; pairing + relay works; **code reuse fails**; **expired
-  code fails**; self-claim fails; relay of an unpaired target or unknown type is
-  refused; rejecting verification tears the link down; peer-left notification.
-* **Transfer engine**: multi-file with an empty file; **corrupted bytes → integrity
-  failure, zero files exposed**; **scrambled offsets → out-of-order failure**;
-  hostile manifest refused; busy manifest refused; cancel is honoured on both
-  sides; connection loss fails both sides instead of hanging; queued second send;
-  progress never exceeds the total; received bytes re-hash to the source.
-
-## 6. Known security limitations
-
-Documented in full in [SECURITY.md](SECURITY.md). Summary:
-
-1. The 6-digit code protects you **only if it is actually compared**; it is a
-   MITM-detection mechanism, not a long-term authenticator.
-2. Device identity is protected by the browser profile, not by hardware; anyone
-   with script execution in that origin can act as the device.
-3. Clearing site data creates a new identity; peers will not silently re-pin a
-   changed key, but a user can re-pair.
-4. Pairing state is in-memory and single-node; there is no account, no revocation
-   propagation, and rate limits reset on restart.
-5. Metadata (device ids, pairing times, IPs, and traffic volume if you deploy TURN)
-   is visible to the operator. File names and contents are not.
-6. Integrity ≠ safety: a transferred executable is still executable. Fluxa never
-   runs installers.
-7. No clipboard, cookie, password or session transfer exists in this build.
-
-## 7. Known networking limitations
-
-* **Same-machine and same-LAN**: verified in this environment (ICE `host`
-  candidate, reported as "Direct host").
-* **Cross-network (different NATs)**: requires STUN and, when the NAT is symmetric,
-  TURN. Both are configuration-only here — **no relay service is bundled or
-  operated**. Not verified end-to-end in this sandbox.
-* **No ICE restart**: an interruption fails the session cleanly rather than
-  recovering. Sessions do not survive a signalling reconnect (a new `connId`
-  invalidates the pairing link).
-* **No local discovery** (mDNS/broadcast): pairing is by code or QR link.
-* **No resumable transfers**: interrupted transfers delete partial data. See
-  ARCHITECTURE.md for the resume design and why resuming by name/size is unsafe.
-* Single-node only; pairing is not shared between instances.
-
-## 8. Reproducing locally
-
-```bash
-# 1. Install and build
-npm install
-npx playwright install --with-deps chromium     # first time only
-npm run build
-
-# 2. Static checks and fast tests
-npm run check
-npm test
-npm audit --omit=dev
-
-# 3. Browser tests (starts its own server on 127.0.0.1:8787)
-npm run test:e2e
-
-# 4. Run the app by hand
-npm start                      # http://localhost:8787
-#    open in two different browser profiles / one private window,
-#    pair with the 6-character code, compare the 6-digit verification code,
-#    then drop a file.
-```
-
-Notes for reproducing:
-
-* The e2e config disables Chromium's mDNS local-IP obfuscation
-  (`--disable-features=WebRtcHideLocalIpsWithMdns`) so ICE host candidates are
-  directly usable inside a container; a normal LAN pair does not need this.
-* If `npm run test:e2e` reports pairing timeouts, make sure no stale server is
-  already listening on port 8787 (`reuseExistingServer` is enabled outside CI).
-* Tests never print file contents or secrets; failures write a Playwright trace to
-  `test-results/`.
-
-## 9. What was explicitly *not* verified
-
-* Firefox, Safari, Android, iOS, Windows and macOS browser runs.
-* Cross-network transfers through STUN/TURN (no relay deployed, and the brief
-  forbids introducing production credentials without authorisation).
-* Resumability, clipboard/link sharing, browser handoff, screen sharing, native
-  apps, and app-package installation — none of these is implemented, so none is
-  claimed.
-
-## 10. Packaging verification (v0.2.0)
-
-Everything below was executed in this workspace; each check inspects the produced
-file, not just the exit status of a compiler.
-
-### Desktop (Linux) — packaged binary, not the dev server
-
-```bash
-xvfb-run -a node -e "…electron.launch({executablePath:'release/linux-unpacked/fluxa'})…"
-# app.getName() = Fluxa, getVersion() = 0.2.0, isPackaged = true
-# appPath = …/resources/app.asar, desktop bridge = 9 methods, device id = 43 chars
-# signal online: ws://127.0.0.1:<port>/ws
-```
-
-`npm run test:desktop` (4 tests, Xvfb) additionally proves: two desktop
-instances pair through one instance's embedded server, a real 1 MB file
-transfers with matching SHA-256, **the bytes are written to disk through the
-native save dialog** (the OS chooser is stubbed, the IPC write is real and the
-file is re-hashed from the filesystem), mDNS advertises and discovers a nearby
-instance, and identity/files survive a restart of the same profile.
-
-### Android
-
-```bash
-apksigner verify --verbose android/app/build/outputs/apk/release/Fluxa-0.2.0-release.apk
-# Verifies using v1 + v2, 1 signer, CN=Fluxa … (local release key)
-aapt2 dump badging …apk
-# package com.fluxa.transfer, versionCode 200, versionName 0.2.0, label Fluxa
-unzip -l …apk | grep -c '\.map$'    # 0 — no source maps shipped
-aapt2 dump resources …apk | grep drawable/splash   # brand splash in every density
-```
-
-### Windows / macOS
-
-* `Fluxa.exe` contains the `0.2.0` version resource and the icon group
-  (`wrestool -l`: 5 icon entries).
-* `Fluxa.app/Contents/Info.plist`: `CFBundleIdentifier=com.fluxa.transfer`,
-  `CFBundleShortVersionString=0.2.0`, `CFBundleName=Fluxa`,
-  `LSMinimumSystemVersion=11.0`.
-* Both are **unsigned** (no Authenticode / Developer ID certificate exists here);
-  the build manifest records that per file.
-
-### CI verification (CircleCI, commit `70daec2`)
-
-Executed by CircleCI on `main`, not on this machine:
-
-| Job | Result |
+| Command / inspection | Observed result |
 | --- | --- |
-| validate | `tsc --noEmit` clean, **60/60** unit tests, production build |
-| security | production audit clean, secret scan clean, no key material tracked |
-| e2e-browser | **12/12** (JUnit: `tests=12 failures=0`), traces on failure |
-| e2e-desktop | 4/4 under Xvfb |
-| build-linux | AppImage 109 290 393 B, deb 76 131 526 B |
-| build-windows | setup 82 162 595 B, portable 81 870 369 B (native Windows runner) |
-| build-android | signed APK 3 761 733 B + AAB 3 554 911 B, v1+v2 verified in the log |
-| build-macos-unsigned | `Fluxa-0.2.0-mac-x64.zip` 100 808 889 B, unsigned |
-| build-web | `Fluxa-0.2.0-web.zip` |
+| `npm ci --no-audit --no-fund` | Completed; lockfile-exact install. |
+| `npm run check` | Passed, strict `tsc --noEmit`. |
+| `npm test` | Passed, **79/79** Node unit and server integration tests. |
+| `npm run test:e2e` | Passed, **18/18** real Chromium E2E tests with two isolated profiles and real WebRTC DataChannels (**3.9 min**). |
+| `npm run test:e2e -- --grep 'cancelling mid-transfer stops' --repeat-each=3` | Passed, **3/3** cancellation repeats. |
+| `xvfb-run -a npm run test:desktop` | Passed, **4/4** Linux Electron E2E tests (dev application instances, not packaged installer runs). |
+| `node scripts/sync-version.mjs --check` | Passed for Android and iOS native version metadata (0.2.0 / 200). |
+| `npm audit --omit=dev --audit-level=critical` | `found 0 vulnerabilities` at the time run. |
+| `npm run ios:sync` | Passed asset/plugin sync. Explicitly skipped CocoaPods and Xcode on Linux; **no iOS compile, simulator run or IPA**. |
+| `npm run android:sync` | Passed asset/plugin/version/icon sync after the final transfer edit. |
+| `(cd android && ./gradlew --no-daemon --max-workers=1 '-Dorg.gradle.jvmargs=-Xmx640m -XX:MaxMetaspaceSize=256m' lintVitalRelease assembleRelease bundleRelease assembleDebug)` | **BUILD SUCCESSFUL** in 25 s (382 tasks; no lintVitalRelease bypass). JDK 17, Android SDK/build-tools 34. Local **release APK/AAB unsigned**; debug APK signed with the normal debug key. |
+| `npm run dist:linux` | Completed; Linux x86_64 AppImage and amd64 deb generated from this working tree. |
+| `CSC_IDENTITY_AUTO_DISCOVERY=false npx electron-builder --mac zip --publish never -c.directories.output=dist-macos` | Completed a **Linux-cross-built, unsigned** macOS x64 `.app` ZIP; **not** a Mac run or notarised release. |
+| Packaged Linux `release/linux-unpacked/fluxa` under Xvfb, Playwright Electron launch | Started with `app.isPackaged=true`, version `0.2.0`, `app.asar`, desktop bridge present and signalling **online** after startup. The first smoke attempt sampled `offline` before connection establishment; rerunning with an explicit wait for `online` passed. Neither deb installation nor AppImage FUSE execution was tested. |
+| `git diff --check`, Python YAML parsing | No whitespace errors; CircleCI YAML parses. This does not substitute for a run of the new CI config. |
 
-Hashes for each of those files are in the per-job `build-manifest.txt`
-artifacts.
+One earlier **full** browser run ended **17 passed / 1 failed**: an existing
+cancellation test timed out *during pairing setup* waiting for the six-digit
+SAS, before any cancellation started. Screenshots showed both sessions back
+on the Devices screen; no definitive cause was identified. The focused test
+then passed 3/3 and the next complete suite passed 18/18. Do **not** describe
+pairing flakiness as fixed or claim a measured zero-failure rate.
 
-### Not verified
+The complete browser suite covers: empty/text/binary/8 MiB files; an actual
+32 MiB browser disk-backed stream (observed receiver JS heap growth **0.4 MiB**
+in that run); ordered batch transfers; decline/cancel/queue/progress/verification/
+disconnect; no-server direct offer/reply; small-screen layout; explicit
+clipboard/link/work-note consent; and a restarted two-profile resume from
+IDB journals and rehashed OPFS bytes. It rejects modified source selection
+and a corrupted saved prefix. The Linux Electron tests cover local embedded
+broker/mDNS, pairing and file save through actual bounded native IPC with an
+OS chooser stub, save-name collision rejection, and identity persistence.
+Node tests additionally cover framing/manifest rejection, hashes, safety,
+TURN credential issuance/denial and recovery/export helpers. **None** of
+these stand in for mobile WebView or external-network hardware tests.
 
-* No physical Android device, no Windows machine and no macOS machine ran these
-  packages. The artifacts were built and inspected, not installed on hardware.
-  (Windows packages *were* built on Windows in CI; that is a build environment,
-  not a run of the app.)
-* macOS `.dmg` was not produced (requires macOS); only the `.zip` was.
+## Artifact inventory: distinguish this tree from prior CI
 
-## 11. Server-less pairing and small-screen fixes (0.2.x)
+All *local* binaries below incorporate the revised web bundle. The Android
+files are copied to `/home/user/fluxa-artifacts/` with `SHA256SUMS`; Linux/mac
+outputs are in the build directories (git-ignored). Hashes were computed from
+those actual files, not inferred from a successful command.
 
-Two user-reported defects were fixed and are now covered by tests:
+| Local file | SHA-256 | Package/signing inspection |
+| --- | --- | --- |
+| `release/Fluxa-0.2.0-linux-x86_64.AppImage` | `c58376a2e9617281bea68d4095657a5b666aab168dd9c2a93ed4d613f2921ae9` | AppImage `--appimage-version` answered; unpacked app GUI smoke passed; no distro signing. |
+| `release/Fluxa-0.2.0-linux-amd64.deb` | `2203bfb5d01a890f7e3dc13255bcbfdad744040ef9226381bff91263e079501b` | `dpkg-deb --field`: `fluxa`, version `0.2.0`, `amd64`; not installed on an OS. |
+| `dist-macos/Fluxa-0.2.0-mac-x64.zip` | `e671093e89fa38c42f27fb355f4ab30c91a71a76841331c7f433441c668b595a` | `.app/Contents/Info.plist`: `com.fluxa.transfer`, `0.2.0`, macOS 11 minimum; **unsigned**, no Mac compile/runtime or notarisation. |
+| `/home/user/fluxa-artifacts/Fluxa-0.2.0-debug-signed.apk` | `0a34c58096f019d6b7b533ad5a663e5107165ef4b464b6ce4e9d59f10846bf46` | `apksigner verify` v1+v2, `CN=Android Debug`; **test-only** app ID `com.fluxa.transfer.debug`, `versionName=0.2.0-debug`. No install test. |
+| `/home/user/fluxa-artifacts/Fluxa-0.2.0-release-unsigned.apk` | `f4eda26b3490b7df8648af00510576bd3c99062b39686abf9e4f77a380fea899` | `apksigner verify`: **DOES NOT VERIFY**; ID `com.fluxa.transfer`, version `0.2.0` / code `200`. Not a distributable release. |
+| `/home/user/fluxa-artifacts/Fluxa-0.2.0-release-unsigned.aab` | `f8b7d3ed99f91fde977bc5b5d70530246ed924d4bd178cea51659d7c76b8b8ee` | `jarsigner -verify`: **jar is unsigned**. Not a Play upload artifact. |
 
-* **No pairing code without a server.** The pairing code came from the signalling
-  server, so an instance with no reachable server showed a spinner and no code —
-  which is every Android install and any desktop instance pointed at nothing.
-  `src/client/direct.ts` adds a ticket exchange (deflated base64 offer/reply
-  carrying SDP + identity + ICE candidates) and `e2e/direct.spec.ts` proves a full
-  pair → verify → 3 MB transfer with **both devices reporting `offline`**.
-  `SignalClient` now also reports `offline` with a reason when it never reached a
-  server, instead of hanging on "connecting".
-* **The app did not fit a small screen.** The fixed three-column board, the
-  non-wrapping header and an unbounded QR canvas overflowed 360×640 (and the QR
-  canvas could crash the renderer outright). The layout is now responsive with a
-  `max-height` breakpoint, the drop zone comes first on phones, the desktop window
-  is clamped to the display and remembers its bounds, and the QR code is only
-  drawn for payloads small enough to be safe. A new test asserts no horizontal
-  overflow and no page overflow at 360×640, and that the pairing dialog fits.
+**CI signing correction, independently checked:** the app owner's signing
+material *does exist on CircleCI*. The successful upstream [pipeline 17](https://app.circleci.com/pipelines/github/favour187/fluxa/17)
+Android job **173** for **old commit `e58c3ff`** publicly exposes a release
+APK, AAB and JSON build manifest. Both downloaded hashes match that manifest:
 
-Test counts at this commit: **71 unit**, **15 browser E2E**, **4 desktop E2E**.
+| Upstream signed artifact (old source) | SHA-256 | Independent signature check |
+| --- | --- | --- |
+| [Release APK](https://output.circle-artifacts.com/output/job/07838611-9a72-41a8-9179-d15ef6455caf/artifacts/0/android-apk/Fluxa-0.2.0-release.apk) | `aa6a74c87e586cce85e488ce5643096cc31128e885046368c18d8919b9a32520` | `apksigner verify --verbose --print-certs` **Verifies**, v1 and v2 true, one release signer `CN=Fluxa, OU=Fluxa Releases` (not the Android debug signer). |
+| [Release AAB](https://output.circle-artifacts.com/output/job/07838611-9a72-41a8-9179-d15ef6455caf/artifacts/0/android-aab/Fluxa-0.2.0-release.aab) | `583616da28a3638815ec2c17223c31f58583fb1876faec02e9d11fe68630798c` | `jarsigner -verify`: **jar verified.** Self-signed release certificate; no signing timestamp. |
 
-### 11.1 Second pass, from real phone screenshots
+The [CI build manifest](https://output.circle-artifacts.com/output/job/07838611-9a72-41a8-9179-d15ef6455caf/artifacts/0/android-manifest/build-manifest.json)
+identifies old commit `e58c3ffc56a29d058a037bc6908d2529b6e61d70`, job 173,
+version 0.2.0, code 200 and both outputs as signed. **Never substitute either
+old signed file for the new unsigned build.** The CI keystore is not available
+locally and must not be extracted or committed. Only the single approved push
+can start a new signed CI build of *this* revision; inspect that job's output
+and signatures independently. The previous CI success also had Windows
+NSIS/portable and an unsigned Linux-built macOS ZIP, but **neither tests these
+new changes**. This report cannot assert their new CI outcomes in advance.
 
-Three defects were still visible on a real Android device and are fixed:
+## Source/build/test/device/distribution status
 
-* **The pairing code was unreadable in practice** (~1 kB of `FLX1z…`). The ticket
-  now carries only what the peer cannot derive: the ICE credentials, the DTLS
-  certificate fingerprint as 32 raw bytes, the public key as its 64-byte point,
-  and candidates packed as `address|port|type`. The session description is
-  rebuilt from those fields, the device id and fingerprint are re-derived from
-  the key, and the candidates are no longer duplicated inside the SDP as well.
-  A real ticket went from ~1060 to ~300 characters, and the reply is the same
-  size. Old full-ticket codes still decode.
-* **The "same network" tab was dead on a phone with no server**: it opened on
-  that tab, showed an empty code, a blank white QR square and an error. With no
-  server the dialog now opens (and switches, once) to Direct code, a pending code
-  reads as `------` instead of a fake code, and an empty QR frame is not drawn.
-  Switching tabs no longer bounces the user back.
-* **Every card on a phone was half width.** The phone breakpoint turned `.grid`
-  into a flex column, but `.grid` also sets `align-items: start`, so each panel
-  shrank to its content width. The grid is kept (one column) and only the order
-  changes; all panels now span the full width.
+| Target | Source | Current build | Automated execution | Physical/runtime validation & distribution |
+| --- | --- | --- | --- | --- |
+| Browser/web | Shared TypeScript source | Web/server bundle built | 79 Node + 18 Chromium E2E | No Firefox/Safari or remote physical devices; deploy behind HTTPS/WSS. |
+| Linux desktop x64 | Electron source | AppImage + deb built locally | 4 Linux Electron E2E; separately smoke-tested packaged unpacked app | No `.deb` install or AppImage FUSE test, distro signature or multi-host LAN test. |
+| Windows desktop | Electron source | Prior upstream Windows CI only | No Windows runtime/test of this revision | New Windows CI NSIS/portable build and runtime test pending; no Authenticode signing. |
+| macOS desktop | Electron source | New **unsigned cross-built ZIP**; prior upstream unsigned CI ZIP | No macOS runtime test | No actual Mac `.dmg`, Developer ID signing or notarisation; normal distribution not ready. |
+| Android | Capacitor project | This revision: unsigned release APK/AAB and debug-key signed test APK. **Old** CI release APK/AAB verified signed | Gradle release lint/build only; **no** emulator/phone test | New signed CI artifacts and real-device WebView/ICE/OPFS/share/install tests pending. |
+| iOS/iPadOS | Tracked iOS Xcode project and plugin config | Linux sync only; optional Mac Simulator CI job unrun | No compile, Simulator, iPhone or signing tests | Mac/Xcode/CocoaPods, Apple developer team/provisioning, physical checks and signed IPA required. |
 
+## Capabilities versus remaining work
+
+- One transfer/protocol implementation serves web, desktop and native webviews;
+  it has per-file SHA-256 commitments, verified restart offsets/prefixes,
+  receiver completion receipts, consent and one-at-a-time queueing. Recovery is
+  **manual** and needs an intact browser profile/OPFS partial and the original
+  source files. It is not OS-background migration or guaranteed durability.
+- Browser folder export preserves relative paths only with a user-selected
+  directory picker; a plain browser download can flatten paths. Mobile export
+  writes to Documents then offers a share sheet, not arbitrary destination
+  access. Those native operations are **not hardware-validated**.
+- Direct codes work in local Chromium tests without a signalling server.
+  Remote ICE needs deployer-operated WSS signalling, STUN and often a public
+  coturn relay. TURN uses access-key-gated, expiring REST credentials. Unit/WS
+  tests cover credential control; **no live public relay or two-NAT physical
+  transfer was tested**. See [NETWORKING.md](NETWORKING.md) for TLS, origin
+  allowlisting, coturn setup, ports, quotas and key rotation.
+- Optional clipboard text, links and work notes require send action, recipient
+  consent and a separate Copy/Open action. No passive clipboard monitor,
+  installed-app transfer, cookies, logins or live browser-session migration.
+- Protocol v2 deliberately rejects v1; upgrade both peers and the broker.
+  Old pending v1 transfers cannot be silently resumed.
+
+**Release gate not met:** new CI jobs must pass on the one pushed commit, and
+hardware tests, cross-NAT/TURN trials, iOS compilation/signing, desktop
+platform/runtime checks and distribution credentials remain outstanding. A
+Play Store update would also need a `versionCode` **higher than any already
+published build**; the previously signed 0.2.0 CI package used code 200, but
+its store publication status was not verified. Nothing here claims a universal,
+production-ready release or a published tag.

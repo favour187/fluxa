@@ -9,7 +9,7 @@ here is aspirational.
 | Asset | Where it lives | Protection |
 |---|---|---|
 | File contents in transit | Peer-to-peer WebRTC DataChannel | DTLS 1.2/1.3 between the two browsers |
-| File contents at rest (receiver) | Memory / Origin Private File System | Browser origin sandbox; SHA-256 verified before exposure |
+| File contents at rest (receiver) | Memory / Origin Private File System | Browser origin sandbox; SHA-256 verified before exposure. Pending OPFS bytes and IndexedDB journal metadata are not separately encrypted by Fluxa |
 | Device private key | IndexedDB as a non-extractable `CryptoKey` | Not exportable by JavaScript; same-origin only |
 | Pairing codes | Server memory only | Random, 2-minute TTL, single use, rate limited |
 | Trust list | IndexedDB per browser profile | Local only; no account, no sync |
@@ -104,7 +104,8 @@ compare it out of band and must both confirm before any file bytes are accepted.
 | Malicious peer sending `../../etc/passwd` | Manifest validation + sanitisation, OPFS sandbox |
 | Malicious peer corrupting bytes | Per-file SHA-256 over exactly the received bytes |
 | Malicious peer flooding with frames | Frame size caps, bounded queues, timeouts, disconnect |
-| Partial file presented as complete | Completion only after digest match + finalise |
+| Partial file presented as complete | Per-file digest, receiver-side durable `doneAck`, verified source/prefix on restart (protocol v2) |
+| Unauthorised TURN bandwidth use | Separate enrolment key required for expiring REST credentials over WSS; key rotation, reverse-proxy limits and coturn quotas remain operator responsibilities |
 
 **Not mitigated (documented gaps)**
 
@@ -128,8 +129,19 @@ compare it out of band and must both confirm before any file bytes are accepted.
 8. **Malicious file *content*.** Fluxa verifies integrity, not safety: a transferred
    executable is still an executable. The UI labels installers as files and never
    runs them.
-9. **Clipboard, cookies and credentials** are never read or transmitted by this
-   build. There is no clipboard integration at all.
+9. **Clipboard text is shared only when the sender deliberately pastes/enters it
+   (or explicitly presses a permission-gated Paste button), and the recipient
+   approves the item.** Copy/Open remains a separate action. Fluxa never
+   monitors the clipboard, silently opens links, or moves cookies, passwords,
+   authentication sessions or browser tabs. A person can still *choose* to paste
+   a secret; both UI and docs warn against it.
+10. **TURN enrolment is a shared operator key, not per-user authorisation.**
+   Someone with that key may consume relay bandwidth. Store it on trusted
+   devices, rotate if leaked, and set quotas/limits on the relay/proxy.
+11. **Private partial files are not protected against local profile compromise**
+   and can be evicted separately from IDB. Recovery re-reads actual OPFS bytes;
+   it never trusts a journal offset alone. A lost source/evicted partial requires
+   a new transfer rather than an invented completion.
 
 ## Reporting
 

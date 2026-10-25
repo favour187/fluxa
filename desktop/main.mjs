@@ -13,9 +13,10 @@
  * narrow preload bridge, navigation locked to the local origin, and every
  * external link handed to the OS browser.
  */
-import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, screen, shell } from 'electron';
-import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
-import { mkdir, writeFile } from 'node:fs/promises';
+import { app, BrowserWindow, clipboard, dialog, ipcMain, Menu, Notification, screen, shell } from 'electron';
+import { constants, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { createHash, randomBytes } from 'node:crypto';
+import { mkdir, open, link, copyFile, unlink } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Bonjour } from 'bonjour-service';
@@ -96,6 +97,10 @@ async function startEmbeddedServer() {
       port,
       host: forcedPort || port === 0 ? '127.0.0.1' : '0.0.0.0',
       publicUrl: null,
+      // Mobile WebViews have a packaged localhost origin, not this LAN host.
+      // Same-origin browser requests are still admitted by the server.
+      allowedOrigins: ['https://localhost', 'http://localhost', 'capacitor://localhost'],
+      allowLanOrigins: true, // a second private-LAN desktop instance has a different origin/port
       log: (line) => log(`[server] ${line}`),
     });
 
@@ -239,9 +244,9 @@ function createWindow() {
 
   // Keep the renderer on the local origin; anything else goes to the real browser.
   mainWindow.webContents.on('will-navigate', (event, url) => {
-    if (!url.startsWith(localUrl)) {
+    if (new URL(url).origin !== new URL(localUrl).origin) {
       event.preventDefault();
-      void shell.openExternal(url);
+      if (/^https?:/.test(url)) void shell.openExternal(url);
     }
   });
   mainWindow.webContents.setWindowOpenHandler(({ url }) => {
@@ -265,7 +270,6 @@ function buildMenu() {
         {
           label: 'Copy this device’s address',
           click: () => {
-            const { clipboard } = require('electron');
             const address = signalling?.port ? `${localUrl}` : '';
             clipboard.writeText(address);
           },
@@ -339,23 +343,111 @@ ipcMain.handle('desktop:save-dialog', async (_event, { name } = {}) => {
 
 ipcMain.handle('desktop:log-lines', () => logLines.slice(-200));
 
-/**
- * Writes received bytes to the path the user chose in the native dialog.
- * The renderer never picks the path itself: it must be one this process just
- * returned, and the payload is a plain transferable ArrayBuffer.
+/** The renderer cannot choose an arbitrary filesystem target. A one-use
+ * capability is granted ONLY after the OS save dialog returns a path. Writes go
+ * to a 0600 sibling .part file, fsync, hash-check, then atomic link (exclusive)
+ * to the chosen name. COPYFILE_EXCL is a fallback on filesystems without links.
  */
 const grantedPaths = new Set();
+const openSaves = new Map();
+const MAX_SAVE_CHUNK = 256 * 1024;
+const MAX_SAVE_BYTES = 64 * 1024 * 1024 * 1024;
 
-ipcMain.handle('desktop:save-file', async (_event, { filePath, bytes } = {}) => {
-  const target = typeof filePath === 'string' ? filePath : '';
-  if (!target || !grantedPaths.has(target)) return { ok: false, error: 'path not granted' };
-  if (!(bytes instanceof Uint8Array) && !ArrayBuffer.isView(bytes)) return { ok: false, error: 'no bytes' };
+async function beginSave(filePath, expectedSize) {
+  if (typeof filePath !== 'string' || !grantedPaths.delete(filePath)) throw new Error('destination was not selected by the user');
+  if (!Number.isSafeInteger(expectedSize) || expectedSize < 0 || expectedSize > MAX_SAVE_BYTES) throw new Error('invalid save size');
+  if (openSaves.size >= 4) throw new Error('too many files being exported');
+  const token = randomBytes(16).toString('hex');
+  const temporary = path.join(path.dirname(filePath), `.${path.basename(filePath)}.fluxa-${token}.part`);
+  const handle = await open(temporary, 'wx', 0o600);
+  openSaves.set(token, { filePath, temporary, handle, expectedSize, written: 0, hash: createHash('sha256'), at: Date.now() });
+  return token;
+}
+
+async function writeSave(token, offset, bytes) {
+  const save = openSaves.get(token);
+  if (!save) throw new Error('save capability is not available');
+  if (!(bytes instanceof Uint8Array) && !ArrayBuffer.isView(bytes)) throw new Error('invalid save chunk');
+  if (!Number.isSafeInteger(offset) || offset !== save.written || !bytes.byteLength || bytes.byteLength > MAX_SAVE_CHUNK ||
+      offset + bytes.byteLength > save.expectedSize) throw new Error('save chunk out of bounds');
+  const buffer = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
+  let position = 0;
+  while (position < buffer.length) {
+    const { bytesWritten } = await save.handle.write(buffer, position, buffer.length - position, offset + position);
+    if (!bytesWritten) throw new Error('disk write returned zero bytes');
+    position += bytesWritten;
+  }
+  save.hash.update(buffer);
+  save.written += buffer.byteLength;
+  save.at = Date.now();
+  return save.written;
+}
+
+async function abandonSave(token) {
+  const save = openSaves.get(token);
+  if (!save) return;
+  openSaves.delete(token);
+  await save.handle.close().catch(() => undefined);
+  await unlink(save.temporary).catch(() => undefined);
+}
+
+async function finishSave(token, expectedHash) {
+  const save = openSaves.get(token);
+  if (!save) throw new Error('save capability is not available');
+  if (!/^[0-9a-f]{64}$/.test(expectedHash) || save.expectedSize !== save.written || save.hash.digest('hex') !== expectedHash) {
+    await abandonSave(token);
+    throw new Error('exported bytes failed size/SHA-256 verification');
+  }
   try {
-    await writeFile(target, Buffer.from(bytes.buffer ?? bytes, bytes.byteOffset ?? 0, bytes.byteLength ?? undefined));
-    grantedPaths.delete(target);
-    log(`saved ${target}`);
-    return { ok: true, filePath: target, bytes: bytes.byteLength ?? 0 };
+    await save.handle.sync();
+    await save.handle.close();
+    try {
+      await link(save.temporary, save.filePath); // same directory; atomic, no overwrite
+    } catch (error) {
+      if (!['EPERM', 'ENOSYS', 'EOPNOTSUPP'].includes(error.code)) throw error;
+      await copyFile(save.temporary, save.filePath, constants.COPYFILE_EXCL);
+    }
+    await unlink(save.temporary).catch(() => undefined);
+    openSaves.delete(token);
+    return { ok: true, filePath: save.filePath, bytes: save.written };
   } catch (error) {
+    await abandonSave(token);
+    throw error;
+  }
+}
+
+ipcMain.handle('desktop:save-begin', async (_event, { filePath, size } = {}) => {
+  try { return { ok: true, token: await beginSave(filePath, size) }; }
+  catch (error) { return { ok: false, error: error.message }; }
+});
+ipcMain.handle('desktop:save-chunk', async (_event, { token, offset, bytes } = {}) => {
+  try { return { ok: true, bytes: await writeSave(token, offset, bytes) }; }
+  catch (error) { await abandonSave(token); return { ok: false, error: error.message }; }
+});
+ipcMain.handle('desktop:save-commit', async (_event, { token, sha256 } = {}) => {
+  try { return await finishSave(token, sha256); }
+  catch (error) { return { ok: false, error: error.code === 'EEXIST' ? 'File already exists; choose a new name' : error.message }; }
+});
+ipcMain.handle('desktop:save-abort', async (_event, token) => {
+  await abandonSave(token);
+  return { ok: true };
+});
+
+// Compatibility bridge for older tests/extensions, bounded to 8 MiB. The app
+// itself uses the streaming methods, so a multi-gigabyte save never materialises
+// as one renderer IPC payload.
+ipcMain.handle('desktop:save-file', async (_event, { filePath, bytes } = {}) => {
+  if (!(bytes instanceof Uint8Array) || bytes.byteLength > 8 * 1024 * 1024) return { ok: false, error: 'use streaming save for large files' };
+  let token;
+  try {
+    token = await beginSave(filePath, bytes.byteLength);
+    for (let at = 0; at < bytes.byteLength; at += MAX_SAVE_CHUNK) {
+      const chunk = bytes.subarray(at, at + MAX_SAVE_CHUNK);
+      await writeSave(token, at, chunk);
+    }
+    return await finishSave(token, createHash('sha256').update(bytes).digest('hex'));
+  } catch (error) {
+    if (token) await abandonSave(token);
     return { ok: false, error: error.message };
   }
 });
@@ -395,6 +487,7 @@ if (!gotLock) {
     if (!BrowserWindow.getAllWindows().length) createWindow();
   });
   app.on('before-quit', () => {
+    for (const token of openSaves.keys()) void abandonSave(token);
     try {
       published?.stop?.();
       bonjour?.destroy?.();

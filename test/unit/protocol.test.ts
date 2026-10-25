@@ -16,7 +16,7 @@ import { sanitizeRelPath } from '../../src/shared/filename.js';
 
 const manifest = (over: Partial<ManifestMsg> = {}): ManifestMsg => ({
   t: 'manifest',
-  v: 1,
+  v: 2,
   transferId: 'a'.repeat(32),
   files: [{ streamId: 1, name: 'note.txt', relPath: 'note.txt', size: 5, mime: 'text/plain' }],
   totalBytes: 5,
@@ -26,12 +26,12 @@ const manifest = (over: Partial<ManifestMsg> = {}): ManifestMsg => ({
 });
 
 test('control frames round-trip', () => {
-  const frame = encodeControl({ t: 'accept', transferId: 'abc' });
+  const frame = encodeControl({ t: 'accept', transferId: 'a'.repeat(32) });
   const decoded = decodeFrame(frame);
   assert.equal(decoded.kind, 'control');
   if (decoded.kind !== 'control') return;
-  assert.deepEqual(decoded.message, { t: 'accept', transferId: 'abc' });
-  const payloadLength = new TextEncoder().encode(JSON.stringify({ t: 'accept', transferId: 'abc' })).byteLength;
+  assert.deepEqual(decoded.message, { t: 'accept', transferId: 'a'.repeat(32) });
+  const payloadLength = new TextEncoder().encode(JSON.stringify({ t: 'accept', transferId: 'a'.repeat(32) })).byteLength;
   assert.equal(new Uint8Array(frame).byteLength, CONTROL_HEADER_BYTES + payloadLength);
 });
 

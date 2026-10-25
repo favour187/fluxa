@@ -1,84 +1,60 @@
-# Platform notes and honest restrictions
+# Platform status and restrictions
 
-Fluxa's reference client is a **web application**. This page records what that
-means per platform, and what a native client would and would not be allowed to do.
+The app has **one TypeScript/WebRTC transfer implementation**, reused by web,
+Electron, Android WebView and iOS WKWebView. Source sharing is not equivalent to
+having built/signed/tested every target. The latest dated verification results
+are in [TEST-REPORT.md](TEST-REPORT.md).
 
-## Today: web client
+| Platform | Source | Local build | Real-device run | Distribution |
+| --- | --- | --- | --- | --- |
+| Chromium browser on Linux | Present | Yes | Two local headless contexts (including restart/resume) | Web app; PWA depends on a secure deployment |
+| Linux desktop | Electron source | E2E launched Linux Electron; local AppImage/deb built, packaged-unpacked binary smoke-tested | No external LAN/physical device or installer run | Unsigned AppImage/deb; no distro signing |
+| Windows desktop | Electron source | Windows CI **baseline** built NSIS/portable, not this unpushed diff | No Windows machine test of this diff | Needs platform test; no Authenticode credential |
+| macOS desktop | Electron source | New unsigned x64 `.app` ZIP cross-built on Linux; Mac job gated on a Mac executor | No macOS machine test of this diff | Needs real Mac build, Apple Developer ID + notarisation for normal distribution |
+| Android | Capacitor project + plugins | Local `assembleRelease bundleRelease` passed; local release outputs **unsigned** and debug APK debug-signed. Previous upstream CircleCI job 173 produced a **release-key signed** APK (v1/v2 independently verified) and AAB, for *earlier source* | No Android phone/emulator test of this change | Existing CI key is not available locally; this revision needs its own signed CI build and physical Android check |
+| iOS/iPadOS | Xcode/Capacitor project, iOS 17 deployment target | `cap sync ios` copied assets/plugins on Linux; pods/Xcode **not** run | No simulator or iPhone test | Needs Mac/Xcode, a developer team and signing/provisioning for an IPA |
 
-| Platform | Runs Fluxa? | Restrictions you will notice |
-|---|---|---|
-| Windows 10/11 | Yes (Chrome, Edge, Firefox) | Files land wherever the browser's download folder is; no system tray or background service; drag-and-drop from Explorer works |
-| macOS | Yes (Safari 17+, Chrome, Firefox) | Safari requires a user gesture for downloads; large-file reception uses OPFS (Safari supports it) |
-| Linux | Yes (Chromium, Firefox) | Same as above |
-| Android | Yes (Chrome, Firefox) | Backgrounding the browser can suspend the tab and abort a transfer; no "share to Fluxa" target without a native app; file picker writes to Downloads |
-| iOS / iPadOS | Yes (Safari 17+) | Aggressive tab suspension; **background transfers are not reliable**; iOS will not let a web app install an app package or read other apps' data |
+## Browser/WebView dependencies
 
-### Browser APIs Fluxa depends on
+Requires WebRTC DataChannels, WebCrypto ECDSA/ECDH, IndexedDB CryptoKey storage
+and an origin-private filesystem (OPFS) for **durable** large-file recovery.
+When OPFS is missing, receive falls back to bounded in-memory storage and
+interruption **cannot** be resumed. Users must grant file/directory picker or
+clipboard access through explicit actions. Site-data clearing/OS eviction may
+remove identity keys or OPFS bytes. Always re-check SAS if the identity changes.
 
-* WebRTC DataChannels (all current browsers)
-* IndexedDB with non-extractable `CryptoKey` storage (all current browsers)
-* Origin Private File System for files > 8 MiB (Chrome/Edge/Firefox 111+/Safari 16.4+;
-  Fluxa falls back to in-memory storage with a smaller size ceiling)
-* WebCrypto ECDSA/ECDH/HKDF/SHA-256
+On Chromium, user-selected directory export preserves nested paths and verifies
+written bytes; browsers without `showDirectoryPicker` download files
+individually. Browser download folders are outside Fluxa's control. Neither a
+website nor an iOS WebView can silently enumerate or install apps, inspect
+another app's data, read browser cookies/tabs, or continuously monitor the
+clipboard. Link/session handoff only shares a **manually entered URL/note**;
+it does not move authentication state or open tabs automatically.
 
-### What the web build deliberately does not do
+## Native constraints
 
-| Feature | Why not |
-|---|---|
-| Local-network discovery | No browser API exposes LAN peers; the desktop shell adds mDNS, browsers use a pairing code or a *Direct code* (which needs no server either) |
-| Clipboard monitoring | There is no permission model for "silently watch the clipboard", and the brief forbids it. Clipboard sharing is not implemented at all in this build |
-| Browser tab handoff | Requires a browser extension with `tabs` permission; not built |
-| Installing transferred packages | Fluxa transfers *files*. Installing an APK/MSI/DMG/DEB is the OS's decision, with its own signing and permission rules |
-| Copying installed iOS apps or protected app data | Prohibited by iOS; Fluxa does not attempt it |
-| Session/cookie transfer | Never implemented. Authentication cookies, passwords and tokens are out of scope |
-| Permanent background transfers | Browsers expire background tabs; a resumed-on-reconnect design is required (see ARCHITECTURE.md) |
+Android/iOS app origins use packaged WebViews with Capacitor Filesystem, Share
+and App plugins. Native exports use Documents + an optional OS share sheet and
+unique directories, **not** unrestricted access to the system Downloads folder
+or all Files app locations. Android's network security config enables cleartext
+for user-selected private LAN broker addresses; remote brokers need WSS.
+iOS declares local-network usage and custom `fluxa://pair` links and permits
+local ATS networking. These settings need on-device verification, including
+permission prompts, foreground/background transitions, iOS WebKit OPFS behaviour,
+link handling, Files exports and interoperability with desktops. Pairing links
+do not grant trust; both users still compare six digits.
 
-## What the desktop shell already provides
+Mobile OS background suspension may stop a transfer. The restart flow is
+re-pair → verify → approve → reselect the same source(s) → compare committed
+prefix hashes. There is no background service/tray, automatic resume or
+cross-network access without a reachable broker and viable ICE/TURN.
 
-Fluxa ships an Electron shell (`desktop/`) that hosts the exact same client inside
-`app.asar`, served through a privileged protocol handler with a strict CSP. It
-adds, today and verified by tests:
+Desktop Electron provides a native save dialog, bounded streaming IPC, an
+embedded LAN broker and mDNS discovery. The renderer has no Node globals and
+cannot save to an arbitrary path without a one-use dialog capability. Normal
+macOS distribution needs signing/notarisation, Windows may warn without
+Authenticode, and Linux packages are not distro-repository signed.
 
-* **mDNS discovery** of `_fluxa._tcp` peers on the local network (browsers cannot
-  open raw mDNS sockets). The desktop test asserts a real advertisement is
-  discovered — discovery is a shortcut to pairing, never trust.
-* **Native save dialog** for received files, and a per-user data directory that
-  survives restarts.
-* **Persistent signalling-server setting**, so a self-hosted server does not have
-  to be re-entered per session.
-
-What the shell still does **not** do: background transfers after the window
-closes, tray/menu-bar presence, OS share targets, platform keystores for the
-identity key (it is still IndexedDB inside the app's origin), or folder sinks.
-
-## What a deeper native client would add
-
-The protocol, transfer engine and validation code are transport- and platform-
-neutral. A fully native client would add:
-
-* LAN discovery (mDNS on macOS/Linux, DNS-SD/`NsdManager` on Android, `NWBrowser` on
-  iOS) with the same pairing/verification flow on top — discovery is never trust.
-* Real background transfers, system notifications, share-sheet targets, "send to
-  device" context menus.
-* Platform keystores for the identity key instead of IndexedDB.
-* A directory sink so folders can be written as folders (the web client can only
-  download file-by-file without the File System Access API directory picker).
-* APK handling on Android: transferring an `application/vnd.android.package-archive`
-  is allowed, and the OS installer then applies its own checks. iOS has no
-  equivalent, and Fluxa must not pretend otherwise.
-
-## Testing status per platform
-
-* **Verified:** headless Chromium (Linux container) via Playwright — 12 end-to-end
-  tests, two independent browser contexts, real WebRTC and real files.
-* **Verified:** the packaged Linux desktop app (`release/linux-unpacked/fluxa`) under
-  Xvfb — app name/version/`isPackaged`, preload bridge, mDNS discovery, 1 MB
-  transfer with matching SHA-256, identity persistence.
-* **Built and inspected, not run on real hardware:** Android release APK/AAB
-  (signature, badging, assets, icons, splash), Windows NSIS/portable exe (version
-  resource, icons), macOS `.app`/`.zip` (`Info.plist`).
-* **Not verified anywhere yet:** Safari, Firefox, iOS, and any physical phone or
-  Windows/macOS machine. The code paths are standards-based and the UI is
-  responsive, but nobody should read this repository as "tested on every
-  platform" until those runs exist. A reproducibility script is in
-  TEST-REPORT.md.
+**Transferring** an APK/MSI/DMG/deb is ordinary file transfer; installation,
+installer permissions and package signatures are always the operating system's
+decision. No privileged installer or full-device migration is part of Fluxa.

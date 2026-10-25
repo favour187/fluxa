@@ -1,185 +1,96 @@
-# Fluxa architecture
-
-## Goals
-
-1. **Immediate feel, honest numbers.** Progress reflects bytes the receiver has
-   acknowledged, not bytes the sender handed to a socket.
-2. **Correctness before features.** A file is "received" only after its SHA-256
-   matches the sender's digest, and a transfer is "complete" only when every file
-   is verified.
-3. **Small, reviewable protocol.** Every message is defined once in
-   `src/shared/protocol.ts` and shared by client, server tests and browser tests.
-4. **Extensibility without rewrites.** Transport, session and transfer layers are
-   separate; content types are just files with a MIME string, so clipboard text,
-   links or future app-state payloads reuse the same machinery.
-
-## Layers
+# Architecture and protocol (v0.2.0 client, wire protocol v2)
 
 ```
-┌──────────────────────────────────────────────────────────────┐
-│ UI (src/client/ui.ts)          projection of AppSnapshot      │
-├──────────────────────────────────────────────────────────────┤
-│ App (src/client/app.ts)        sessions, devices, transfers   │
-├──────────────────────────────────────────────────────────────┤
-│ TransferManager                routes traffic, enforces rules │
-│   SendTask            ReceiveTask (sinks: memory / OPFS)      │
-├──────────────────────────────────────────────────────────────┤
-│ PeerSession (WebRTC)   identity pinning, DTLS binding, SAS    │
-├──────────────────────────────────────────────────────────────┤
-│ SignalClient (WS)      hello signature, code claim, relay     │
-└──────────────────────────────────────────────────────────────┘
-        ▲                                    ▲
-        │  src/shared/protocol.ts            │  src/shared/crypto.ts
-        └──────────────┬─────────────────────┘
-                       │
-        Signalling server (src/server): static host, identity
-        verification, pairing store, relay authorisation
+Browser / Capacitor WKWebView / Android WebView / Electron renderer
+    identity.ts   -> non-extractable IndexedDB P-256 key + pinned trust
+    signal.ts     -> signed challenge, pairing-code/SDP/ICE over WS/WSS
+    direct.ts     -> compressed offer/reply codes without a broker
+    peer.ts       -> DTLS-bound ECDH transcript + six-digit SAS
+    transfer/*    -> shared chunked sender, receiver, journal, OPFS sink, exports
+    share.ts      -> optional explicitly approved text/link/work-link module
+                         |
+              verified WebRTC DataChannel
+                         |
+                another device with the same protocol
+
+Node broker: static UI, short pairing codes, ICE signalling, optional short-
+lived coturn REST credentials. It NEVER accepts file bytes for forwarding.
+Desktop: embedded LAN broker + mDNS/IPC-backed save dialog.
+Mobile: one shared Capacitor web bundle + native Filesystem/Share/App plugins.
 ```
 
-### Identity
+## What is authenticated
 
-* One ECDSA P-256 key pair per browser profile, generated on first load, stored as
-  a **non-extractable** `CryptoKey` in IndexedDB (`fluxa` database).
-* `deviceId = base64url(SHA-256(SPKI public key))  →  43 characters`.
-* Display names, platforms and fingerprints are *presentation only*; every trust
-  decision uses the device id and public key.
-* Trusted devices are pinned locally. If a trusted device presents a different
-  public key for the same id, Fluxa refuses the session (`trustDevice` throws and
-  the app surfaces an error) rather than silently re-pinning.
+The signalling server challenges each connection; each client signs its
+challenge using its persistent ECDSA P-256 key. The server verifies the public
+key's derived device id and sends protocol v2 configuration. This proof does
+**not** enrol users or trust new devices. Pairing code TTL is two minutes and
+single-use. The WebRTC DataChannel handshake separately checks the same key,
+its signature over session nonce/ephemeral ECDH/DTLS fingerprints, and the
+negotiated peer certificate. Both users must compare the derived six-digit SAS
+and tap *Codes match*. Revoking a device removes local pinned trust.
 
-### Pairing
+Direct codes (`FLX1…`) encode the offer/answer and public identity; their
+`protocolVersion: 2` prevents accidentally pairing with the previous wire
+format. Each new pairing needs a fresh SAS, even for a previously trusted key.
+No server can silently verify on the user's behalf. On direct codes, the
+signalling stage is skipped, not the peer authentication stage.
 
-1. Device A asks the server for a code: 6 characters from a 32-symbol alphabet
-   (no `I`, `O`, `0`, `1`), TTL 120 s, single use, one outstanding code per device.
-2. Device B submits the code. The server consumes it *before* replying, so a
-   concurrent second claim fails.
-3. Both sides receive each other's `{connId, deviceId, publicKey, fingerprint,
-   name, platform, sessionNonce}`. `sessionNonce` is fresh per pairing and is
-   mixed into the verification transcript.
-4. QR codes encode `https://host/?pair=CODE`; opening the link claims the code.
+## Files, folders, and recovery
 
-### Transport
+A verified sender computes a **whole-file SHA-256 commitment** for every
+selected source before offering a manifest with total size, bounded paths,
+stream ids and hashes. The receiver checks limits and traversal, asks the user
+to accept, and creates a transfer journal in IndexedDB before sending `accept`.
+The sender streams 64 KiB chunks with an acknowledgement window; progress
+counts receiver acknowledgements, not queued socket bytes. The receiver writes
+committed chunks into OPFS, hashes on receipt, checks every file and sends a
+file result. The sender only declares `complete` after a separate `doneAck`
+recording receiver-side verified completion. Cancellation/failure never reports
+success.
 
-* WebRTC `RTCPeerConnection`, one ordered `DataChannel` named `fluxa`.
-* `PeerSession` (initiator = the device that claimed the code) creates the channel
-  and the offer; ICE candidates are trickled through the server and buffered until
-  the remote description exists.
-* The server authorises relay only between two connections that completed a
-  pairing, and only for the message types `offer`, `answer`, `ice`, `bye`,
-  `renegotiate`. It cannot inject file data: file bytes never go through it.
+On a restart, the journal contains identity/manifest **metadata only**, not
+file bytes. OPFS stores the partial. After reconnecting and comparing a new
+SAS, the sender must reselect the *same* source(s) and re-hash them; the receiver
+rehashes actual partial bytes before offering each resume offset/prefix digest.
+The sender rehashes that source prefix and rejects any mismatch **before**
+appending data. A completed receiver journal permits a lost completion receipt
+to be replayed without claiming an unverified send. In-memory fallback is
+bounded and **not durable**; browser eviction, private mode, permission changes,
+missing sources, and cleared site data can prevent resume. Transfers do not
+resume automatically or run in the background.
 
-### Session verification (the part that must not be skipped)
+Path handling sanitises relative paths and prevents `..`/absolute/duplicate
+names. Chromium's user-selected directory export writes bounded chunks, checks
+SHA-256 again, retains subfolders and avoids known name collisions. Electron
+uses a native save-dialog capability, bounded IPC writes to a 0600 temporary
+file, hash/size check and an exclusive commit (no silent overwrite). Native
+Capacitor exports write 64 KiB base64 chunks into a unique Documents directory,
+then may offer the OS share sheet. On browsers without a directory picker, Save
+falls back to downloads and cannot guarantee a folder tree in Downloads.
 
-Both peers, once the DataChannel is open, send a signed `hello`:
+## Content sharing is deliberately separate
 
-```
-sig = ECDSA(identityKey, "fluxa/1/hello|deviceId|peerDeviceId|sessionNonce|
-                          identityFingerprint|dtlsFingerprint|nonce|ephPub")
-```
+`share.ts` carries at most 16 KiB of a user-entered clipboard text, URL, or
+work-link note over the already verified channel. Incoming content is only
+shown in an approval dialog; it is not copied or opened until the recipient
+approves **and then** explicitly presses Copy/Open. A click on *Paste clipboard*
+is the only clipboard-read action and may require OS/browser permission.
+This is not passive clipboard sync, installed-app migration, cookies/password
+transfer, browser-tab capture, or background session continuity.
 
-Acceptance requires all of:
+## Compatibility and limitations
 
-1. `hello.deviceId` and `hello.publicKey` equal the values pinned during pairing.
-2. `hello.dtls` equals the SHA-256 fingerprint that actually appears in the
-   negotiated SDP (`a=fingerprint:sha-256 …`) — this binds the authenticated key to
-   the DTLS session that carries the bytes.
-3. The signature verifies over the full transcript.
+`PROTOCOL_VERSION=2` is intentionally incompatible with v1, which could not
+prove a durable final receipt/resume contract. The server rejects old hello
+messages, the new client rejects old challenges, the DataChannel validates
+version 2, and direct tickets without `protocolVersion: 2` are rejected. All
+participants (including an embedded desktop broker) must update together.
+The **product version remains 0.2.0**; wire and package versions are separate.
+No migration reinterprets an old incomplete v1 journal as a verified v2 send.
 
-Then both sides exchange ephemeral ECDH public keys and compute
-
-```
-SAS = first 6 digits of SHA-256("fluxa/1/sas" | sessionNonce | sorted(
-        (deviceId, fingerprint, ephPub, nonce) for both peers))
-```
-
-SAS digits are displayed on both screens. **Nothing can be transferred until both
-users confirm.** The 6 digits are order-independent (both peers compute the same
-value regardless of who claimed the code) and change if any key, nonce or DTLS
-fingerprint differs.
-
-### Transfer protocol
-
-Control frames are JSON, chunk frames are binary, both framed with a 1-byte magic
-and a type tag (`src/shared/protocol.ts`):
-
-| Frame | Layout |
-|---|---|
-| Control | `F1 01 0000 <len:u32be> <json>` |
-| Chunk | `F1 02 <streamId:u32be> <offset:f64be> <payload…>` |
-
-Message flow: `manifest → accept → chunk* + chunkAck* → fileEnd(sha256) →
-fileResult → … → done`.
-
-Rules enforced by the receiver:
-
-* The manifest is validated and every name/path is sanitised
-  (`sanitizeFilename`, `sanitizeRelPath`): no traversal, no absolute paths, no NUL
-  bytes, no Windows reserved names, bounded length and depth.
-* Chunks for unknown streams, out-of-order offsets, or data beyond the declared
-  size are hard failures, not best-effort writes.
-* Writes are serialised through a promise chain so asynchronous disk writes can
-  never reorder bytes.
-* Per-file SHA-256 is computed incrementally (WebCrypto has no streaming digest, so
-  `src/client/sha256.ts` implements one and is tested against Node's crypto).
-* `done` is only accepted when every stream is finalised and verified.
-
-Backpressure is enforced twice: the sender waits for `bufferedamountlow` when the
-DataChannel buffer exceeds 1 MiB, and it also keeps at most 8 MiB unacknowledged.
-
-Progress = acknowledged bytes. Speed is an EWMA of acknowledged throughput; the
-ETA is therefore stable and cannot claim faster-than-real progress.
-
-### Storage on the receiving side
-
-* Files ≤ 8 MiB, or any transfer in a browser without OPFS: `MemorySink`
-  (a `Blob` the user can save).
-* Larger files: `OpfsSink` writes to the Origin Private File System in 64 KiB
-  chunk writes, so file size is bounded by quota, not by RAM. Measured heap growth
-  for a 32 MB transfer: **3.3 MB**.
-* Nothing is finalised until the digest matches. On failure or cancellation, both
-  sinks discard their data (`abort()` also removes the OPFS entry).
-
-### Resumability (not implemented)
-
-Resume is deliberately absent: a correct implementation has to persist transfer
-id, stream ids, per-stream byte ranges, hashes of received ranges and the session
-nonce, and both peers must agree on all of it after reconnecting — resuming on
-filename/size alone is unsafe because it can splice two different files together.
-The intended design is a `resume` control message carrying
-`{transferId, streamId, nextOffset, partialDigest}` validated against a persisted
-receive log; until that exists, interrupted transfers fail cleanly and the partial
-file is deleted.
-
-### Native clients
-
-The transport-agnostic layers (`shared/protocol`, `shared/filename`, the transfer
-engine, `sha256`) contain no browser-only API except WebCrypto and timers, so a
-native shell can reuse them by supplying:
-
-* a key store backed by the platform keystore (Keychain / Keystore / TPM),
-* a socket transport (WebRTC via `flutter_webrtc`, or a TLS-QUIC channel with the
-  same framing),
-* a file sink using the platform's file APIs.
-
-The browser client is the reference implementation: Windows/macOS/Linux/Android/
-iOS apps are **planned, not built**.
-
-### Future continuity
-
-The following are design notes only — none is implemented:
-
-* **Screen sharing / remote assistance**: a second media track plus an explicit,
-  revocable session grant; never auto-enabled.
-* **Browser/tab handoff**: send `{url, title, scroll, selection}` as a `link`
-  content type; requires a browser extension for tab APIs, which is not built.
-* **Task continuity / app-state handoff**: a `state` content type with a signed,
-  expiring payload, plus per-app adapters. Authentication cookies, passwords and
-  session tokens are explicitly out of scope.
-
-## Why no framework
-
-The UI is ~900 lines of TypeScript creating DOM nodes directly. That keeps the
-bundle at ~188 KB (including the QR encoder), removes a whole dependency tree from
-the security surface, and makes the render path obvious. The UI is a pure
-projection of `AppSnapshot`; transfer rows are built once and patched in place so
-that progress updates never destroy focus or buttons.
+Automatic discovery is Electron-only (mDNS); browsers and mobile use manual
+pairing/QR/direct codes. No package installation, remote clipboard polling,
+public hosted TURN service, offline remote transfer, guaranteed iOS background
+transfer, or provider-mediated user accounts are implemented. See
+[NETWORKING.md](NETWORKING.md) and [PLATFORM-NOTES.md](PLATFORM-NOTES.md).

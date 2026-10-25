@@ -8,6 +8,7 @@ export type TransferState =
   | 'incoming' // receiver: approval dialog open
   | 'transferring'
   | 'verifying'
+  | 'paused' // durable partial; user re-pairs and re-selects the source to resume
   | 'complete'
   | 'declined'
   | 'cancelled'

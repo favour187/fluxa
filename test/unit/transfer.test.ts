@@ -253,7 +253,7 @@ test('manifests that try to escape the destination are refused', async () => {
   h.a.handleChunk; // (no-op reference so the import is used consistently)
   const evil = {
     t: 'manifest' as const,
-    v: 1,
+    v: 2,
     transferId: 'b'.repeat(32),
     files: [{ streamId: 1, name: 'passwd', relPath: '../../etc/passwd', size: 4, mime: 'text/plain' }],
     totalBytes: 4,
@@ -272,7 +272,7 @@ test('a manifest with duplicate streams or a wrong total is refused', async () =
   const h = await harness();
   h.b.handleControl({
     t: 'manifest',
-    v: 1,
+    v: 2,
     transferId: 'c'.repeat(32),
     files: [
       { streamId: 1, name: 'a.txt', relPath: 'a.txt', size: 1, mime: 'text/plain' },
@@ -322,7 +322,7 @@ test('a second manifest while busy is refused with an explicit error', async () 
 
   h.b.handleControl({
     t: 'manifest',
-    v: 1,
+    v: 2,
     transferId: 'd'.repeat(32),
     files: [{ streamId: 1, name: 'x.txt', relPath: 'x.txt', size: 1, mime: 'text/plain' }],
     totalBytes: 1,

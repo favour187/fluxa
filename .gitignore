@@ -5,6 +5,10 @@ node_modules/
 dist/
 /public/
 release/
+dist-linux/
+dist-macos/
+dist-windows/
+ios-artifacts/
 artifacts/
 test-results/
 playwright-report/

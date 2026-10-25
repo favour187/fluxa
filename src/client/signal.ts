@@ -14,10 +14,11 @@ import {
   verifySignature,
 } from '../shared/crypto.js';
 import type { Identity } from './identity.js';
+import { PROTOCOL_VERSION } from '../shared/protocol.js';
 
 export type ServerEvent =
   | { t: 'challenge'; nonce: string; protocolVersion: number }
-  | { t: 'ready'; connId: string; iceServers: RTCIceServer[]; limits: unknown; chunkSize: number; publicUrl: string | null }
+  | { t: 'ready'; connId: string; iceServers: RTCIceServer[]; limits: unknown; chunkSize: number; publicUrl: string | null; turnRequired?: boolean }
   | { t: 'code'; code: string; expiresAt: number; link: string | null }
   | { t: 'codeCancelled' }
   | { t: 'profileUpdated'; name: string }
@@ -55,6 +56,7 @@ export class SignalClient {
   private reconnectTimer: number | null = null;
   private closedByUser = false;
   private url: string;
+  private turnAccessKey: string | null;
   status: SignalStatus = 'offline';
   connId: string | null = null;
   iceServers: RTCIceServer[] = [];
@@ -64,13 +66,24 @@ export class SignalClient {
   constructor(
     private readonly identity: Identity,
     url?: string,
+    turnAccessKey?: string | null,
   ) {
     const proto = location.protocol === 'https:' ? 'wss:' : 'ws:';
     this.url = url ?? `${proto}//${location.host}/ws`;
+    this.turnAccessKey = turnAccessKey ?? null;
   }
 
   get currentUrl(): string {
     return this.url;
+  }
+
+  /** A new key requires a fresh authenticated signalling session. Never send it over ws://. */
+  setTurnAccessKey(key: string | null): void {
+    this.turnAccessKey = key;
+    this.resetConnectionState();
+    this.socket?.close();
+    this.socket = null;
+    this.connect();
   }
 
   /**
@@ -130,6 +143,12 @@ export class SignalClient {
         return;
       }
       if (msg.t === 'challenge') {
+        if (msg.protocolVersion !== PROTOCOL_VERSION) {
+          this.emit({ t: 'error', code: 'incompatible_protocol',
+            message: `This server uses transfer protocol ${msg.protocolVersion}; Fluxa needs version ${PROTOCOL_VERSION}. Update both clients and the server.` });
+          this.disconnect();
+          return;
+        }
         void this.sendHello(msg.nonce);
         return;
       }
@@ -145,6 +164,7 @@ export class SignalClient {
     });
 
     socket.addEventListener('close', () => {
+      if (this.socket !== socket) return; // a previous server/key was replaced
       this.socket = null;
       this.connId = null;
       if (this.closedByUser) {
@@ -189,6 +209,8 @@ export class SignalClient {
     );
     this.raw({
       t: 'hello',
+      protocolVersion: PROTOCOL_VERSION,
+      ...(this.url.startsWith('wss:') && this.turnAccessKey ? { turnAccessKey: this.turnAccessKey } : {}),
       deviceId: this.identity.deviceId,
       publicKey: this.identity.publicKey,
       fingerprint: this.identity.fingerprint,

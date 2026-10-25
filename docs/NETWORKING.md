@@ -1,147 +1,134 @@
-# Networking, deployment and remote transfers
+# Connectivity and self-hosting (protocol v2)
 
-Fluxa ships with the signalling server and a static host. It does **not** ship a
-STUN or TURN service, TLS certificates, or public infrastructure. This document is
-the configuration and deployment guide, plus an honest description of what works
-out of the box.
+Fluxa streams **encrypted WebRTC DataChannel bytes** between peers. The Node
+server hosts the UI, signs neither file nor device identities, brokers single-use
+pairing codes, and relays SDP/ICE *signalling* only. When direct ICE fails, an
+**optional, separately deployed coturn server** forwards encrypted packets; it
+never decrypts the DTLS application channel. Both people must compare and
+approve the same six-digit SAS after *every new pairing*. Discovery and URLs are
+not trust signals.
 
-## What works with the default configuration
+## What each path requires
 
-* Two devices on the same machine (different browser profiles): direct, verified,
-  ~all of the transfer throughput your loopback allows.
-* Two devices on the same LAN: works when ICE can gather **host** candidates and
-  the two browsers can reach each other (no client isolation, no firewall blocking
-  UDP). Fluxa reports `Direct host` in the device row.
-* Anywhere else: ICE may fail. That is a networking reality (CGNAT, symmetric NAT,
-  restrictive firewalls), not a bug. Configure STUN/TURN as below.
+| Path | Needed | Verified in this repository |
+| --- | --- | --- |
+| Same browser host / compatible private LAN | Fluxa Node or desktop broker; reachable UDP host candidates | Two Chromium contexts and two Linux Electron instances passed transfer E2E locally. LAN hardware/firewall not tested. |
+| Direct offer/reply code | No signalling server; viable WebRTC ICE path | Chromium E2E passed with server disconnected. Still needs real network connectivity. |
+| NAT traversal (srflx) | Reachable STUN service in `FLUXA_ICE_SERVERS` | Configuration and ICE path reporting are implemented; no multi-NAT device test. |
+| Remote relay | Public `wss://` Fluxa server **and** reachable coturn with TLS/UDP/TCP, operator access key, bandwidth quotas | REST credential issuance tested with real WebSockets. No external TURN server or two-network hardware test was run here. |
 
-Fluxa never claims "remote transfers work" without a relay you operate.
+A desktop app binds an embedded LAN broker and allows other **private-LAN**
+Electron origins/ports and the three explicitly listed packaged-mobile origins;
+the ordinary public server rejects arbitrary browser origins. Browsers cannot
+run an mDNS broker; the desktop shell advertises `_fluxa._tcp` for convenience.
+An mDNS sighting never bypasses SAS verification. Android/iOS require a reachable
+separate broker or a serverless direct code: they do not run one themselves.
 
-## Configuration
+## Configure the signalling server
 
-The server reads environment variables (`src/server/index.ts`):
+Run `npm ci && npm run build && PORT=8787 HOST=127.0.0.1 npm start`. On a local
+LAN, set `HOST=0.0.0.0` and open the firewall appropriately. On the public
+internet **do not expose plaintext HTTP/WS**: put a TLS reverse proxy in front
+and set `FLUXA_PUBLIC_URL=https://fluxa.example.com`. In app Settings →
+**Signalling server**, enter that hostname; public `ws://` is intentionally
+rejected. Private/loopback `ws://` remains an explicit LAN-only option.
 
-| Variable | Default | Meaning |
-|---|---|---|
-| `PORT` | `8787` | HTTP/WebSocket port |
-| `HOST` | `0.0.0.0` | Bind address |
-| `FLUXA_PUBLIC_URL` | – | Base URL used to build QR/pairing links, e.g. `https://fluxa.example.com` |
-| `FLUXA_ALLOWED_ORIGINS` | – (allow all) | Comma-separated WebSocket origin allow-list |
-| `FLUXA_ICE_SERVERS` | `[]` | JSON array of `RTCIceServer` objects handed to clients |
-| `FLUXA_TRUST_PROXY` | `0` | Set to `1` behind a reverse proxy to use `X-Forwarded-For` for rate limits |
-
-Example `.env`-style values (see `.env.example`):
-
-```bash
-FLUXA_ICE_SERVERS='[
-  {"urls":"stun:stun.example.com:3478"},
-  {"urls":["turn:turn.example.com:3478?transport=udp","turn:turn.example.com:3478?transport=tcp"],
-   "username":"fluxa","credential":"REPLACE_WITH_SECRET"}
-]'
-```
-
-### STUN vs TURN
-
-* **STUN** lets each peer discover its public reflexive address. It costs almost
-  nothing and is required for most NAT-to-NAT direct connections. A public STUN is
-  acceptable (`stun:stun.l.google.com:19302`) but self-hosting (coturn) removes a
-  third-party dependency.
-* **TURN** relays encrypted DTLS packets when a direct path cannot be found
-  (symmetric NAT, CGNAT, enterprise firewalls, some mobile networks). TURN carries
-  bandwidth: size it for expected concurrent transfers and enable its TCP/TLS
-  transport on port 443 for restrictive networks.
-* Fluxa's UI distinguishes direct (`host`/`srflx` candidate) from relayed
-  connections, so support can tell the difference without guessing.
-
-**Do not point Fluxa at a public TURN service with static, shared credentials.**
-Use short-lived TURN credentials (coturn's `use-auth-secret` with a REST API
-credential derived per user). Delivering those to browsers requires a small
-authenticated endpoint; this repository does not implement one, because doing so
-without knowing your identity provider would be guesswork.
-
-## HTTPS and secure signalling
-
-Browsers require a secure context for WebRTC on non-localhost origins, and
-`wss://` is mandatory. Terminate TLS in front of the Node process:
-
-```
-[coturn]            udp/3478, tcp/3478, tls/5349
-[nginx/caddy]   →   http://127.0.0.1:8787   (this app)
-```
-
-Example Caddyfile (automatic TLS, WebSocket proxying is automatic):
-
-```
+```text
 fluxa.example.com {
   encode zstd gzip
   reverse_proxy 127.0.0.1:8787
 }
 ```
 
-Example nginx fragment:
+Caddy above obtains a certificate and proxies WebSocket upgrades. Set exact
+`FLUXA_ALLOWED_ORIGINS`, e.g.
+`https://fluxa.example.com,https://localhost,http://localhost,capacitor://localhost`
+when you actually support packaged mobile WebViews. Do **not** set
+`FLUXA_TRUST_PROXY=1` unless the proxy strips untrusted forwarded headers and
+provides a trustworthy `X-Forwarded-For`. `PORT`, `HOST`, `FLUXA_PUBLIC_URL`,
+`FLUXA_ALLOWED_ORIGINS`, `FLUXA_TRUST_PROXY`, `FLUXA_ICE_SERVERS`,
+`FLUXA_TURN_URLS`, `FLUXA_TURN_SECRET`, `FLUXA_TURN_ACCESS_KEY`, and
+`FLUXA_TURN_TTL_SECONDS` are read at server startup. Pairing state is in memory:
+one node or sticky sessions are required. Neither static app server nor TURN is
+operated by the repository maintainers.
 
-```nginx
-server {
-  listen 443 ssl http2;
-  server_name fluxa.example.com;
-  # ssl_certificate ...;
+Set `FLUXA_ICE_SERVERS='[{"urls":"stun:stun.example.com:3478"}]'` for STUN.
+**Static TURN usernames/passwords in `FLUXA_ICE_SERVERS` now fail startup**,
+rather than silently exposing reusable credentials. The public `/api/config`
+endpoint contains no TURN secret or credential. The authenticated WebSocket
+`ready` response includes an expiring credential **only when** the device
+presents the operator-issued relay access key. The challenge signature alone
+proves ownership of a *self-created* device identity, not authorisation to
+consume your TURN bandwidth.
 
-  location / {
-    proxy_pass http://127.0.0.1:8787;
-    proxy_http_version 1.1;
-    proxy_set_header Upgrade $http_upgrade;
-    proxy_set_header Connection "upgrade";
-    proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
-    proxy_read_timeout 3600s;   # signalling sockets are long-lived
-    client_max_body_size 1m;    # signalling only: no uploads pass through here
-  }
-}
-```
+## Operate coturn with time-limited credentials
 
-Then start the app with:
+Generate **two distinct values** independently; never commit, log, embed in a
+QR code or paste them into a chat. Example shell commands:
 
 ```bash
-FLUXA_TRUST_PROXY=1 \
+openssl rand -hex 32  # coturn REST shared secret, on server and coturn only
+openssl rand -hex 32  # separate device-enrolment/access key, enter in Fluxa Settings
+```
+
+Minimal coturn configuration (adapt hostnames, external IP, TLS certificates,
+quotas and firewall to your deployment):
+
+```ini
+listening-port=3478
+tls-listening-port=5349
+realm=relay.example.com
+fingerprint
+use-auth-secret
+static-auth-secret=SET_THE_FIRST_INDEPENDENT_SECRET_HERE
+stale-nonce
+no-loopback-peers
+no-multicast-peers
+min-port=49152
+max-port=49252
+user-quota=4
+total-quota=100
+cert=/etc/letsencrypt/live/relay.example.com/fullchain.pem
+pkey=/etc/letsencrypt/live/relay.example.com/privkey.pem
+# external-ip=PUBLIC_IP/PRIVATE_IP   # required when coturn is behind 1:1 NAT
+```
+
+Open UDP/TCP 3478, TCP 5349 and the selected UDP relay port range; for strict
+networks deploy turns on 443 via a dedicated IP/port instead. Configure
+`FLUXA_TURN_SECRET` to equal coturn's `static-auth-secret` and set the **other**
+secret as `FLUXA_TURN_ACCESS_KEY` on the Fluxa server. For example:
+
+```bash
 FLUXA_PUBLIC_URL=https://fluxa.example.com \
 FLUXA_ALLOWED_ORIGINS=https://fluxa.example.com \
-FLUXA_ICE_SERVERS='[...]' \
+FLUXA_ICE_SERVERS='[{"urls":"stun:relay.example.com:3478"}]' \
+FLUXA_TURN_URLS='["turn:relay.example.com:3478?transport=udp","turn:relay.example.com:3478?transport=tcp","turns:relay.example.com:5349?transport=tcp"]' \
+FLUXA_TURN_SECRET="$REST_SECRET" FLUXA_TURN_ACCESS_KEY="$ENROLMENT_KEY" \
 PORT=8787 HOST=127.0.0.1 npm start
 ```
 
-### Checklist before exposing a node
+`REST_SECRET`/`ENROLMENT_KEY` above are illustrative environment variable names,
+not literal credentials. Give authorised users only the *enrolment key*. Each
+mobile/desktop/browser profile enters it into **Settings → Remote relay access
+key** (stored per origin), then pairs again. The client refuses to transmit it
+on `ws://`; use a public `wss://` endpoint. The REST credential includes a
+random per-session username and an expiry (default 43,200 seconds; configure
+600–86,400), and is HMAC-SHA1 signed as coturn expects. A user without the key
+can still attempt host/STUN paths but receives **no** TURN credential.
 
-- [ ] TLS terminated, `wss://` only, HSTS at the proxy.
-- [ ] `FLUXA_ALLOWED_ORIGINS` set to your exact origins.
-- [ ] `FLUXA_TRUST_PROXY=1` **only** when a trusted proxy sets `X-Forwarded-For`.
-- [ ] Reverse-proxy connection rate limits (e.g. nginx `limit_conn`), because the
-      in-process limits are per-node and reset on restart.
-- [ ] TURN credentials short-lived; TURN quotas monitored.
-- [ ] Logging: Fluxa logs device id prefixes, never file names or contents. Keep it
-      that way, and set a retention period.
-- [ ] Single-node topology. Pairing state is **in memory**; multiple instances
-      behind a load balancer will break pairing unless you add sticky sessions or a
-      shared store (`src/server/pairing.ts` is the seam for that).
+The enrolment key is a shared service secret, **not** an account, per-user
+subscription, or defence against a member abusing bandwidth. Rotate it when
+leaked, protect the public reverse proxy from socket floods, apply coturn
+bandwidth limits/monitoring and consider a separate proper auth service for
+large multi-tenant deployments. No external relay availability, data cap, or
+remote-device success is guaranteed by a green local build.
 
-## Local-network discovery
+## Mobile and privacy notes
 
-Discovery over mDNS/UDP broadcast is **not implemented**. Devices pair with a code
-or QR link, which works on any network without exposing a device list to everyone
-on the subnet. If discovery is added later it must run browser-side (WebRTC does
-not expose discovered peers without a signalling channel) or in a native client.
-
-## Required work for real remote transfers
-
-Implemented today: WebRTC negotiation, ICE server configuration plumbing, relay
-authorisation on the signalling server, direct-vs-relay reporting, timeouts and
-recovery on the session layer.
-
-Still required before calling remote transfer "supported":
-
-1. Deploy signalling behind TLS with an origin allow-list (steps above).
-2. Deploy STUN, measure direct-connection success per network class.
-3. Deploy TURN with short-lived credentials and capacity planning; add the
-   authenticated credential endpoint.
-4. Add ICE restart on `disconnected` (currently the session fails fast, which is
-   honest but not resilient).
-5. Load test signalling; move pairing state to a shared store if scaling past one
-   node.
+Android permits plaintext LAN signalling for user-selected private endpoints;
+iOS has a local-network permission/ATS exception, both still require SAS and
+WebRTC encryption. A public deployment uses WSS. Local signalling can reveal
+identity/pairing metadata to someone on that LAN; files are never uploaded to
+Node and TURN sees ciphertext. Android/iOS background suspension can interrupt
+active streams; resumability needs persistent private storage and a new human
+verification/re-selection, not an unrestricted background service.

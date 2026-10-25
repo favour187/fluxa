@@ -7,7 +7,7 @@
  * the SHA-256 of the public key, which makes display names cosmetic and lets
  * peers pin real cryptographic identities.
  */
-import { deriveDeviceId, exportPublicKeySpki, generateIdentityKeyPair } from '../shared/crypto.js';
+import { deriveDeviceId, exportPublicKeySpki, generateIdentityKeyPair, publicKeyFingerprint } from '../shared/crypto.js';
 
 const DB_NAME = 'fluxa';
 const DB_VERSION = 1;
@@ -137,9 +137,7 @@ export async function setDeviceName(name: string): Promise<void> {
 
 /** SHA-256 of the SPKI bytes, formatted as a colon-separated hex fingerprint. */
 export async function fingerprintOf(publicKeyB64: string): Promise<string> {
-  const { b64urlDecode, sha256, toHex } = await import('../shared/crypto.js');
-  const hex = toHex(await sha256(b64urlDecode(publicKeyB64))).toUpperCase();
-  return hex.match(/.{2}/g)!.join(':');
+  return publicKeyFingerprint(publicKeyB64);
 }
 
 export async function listTrusted(): Promise<TrustedDevice[]> {

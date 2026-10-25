@@ -55,6 +55,12 @@ export async function deriveDeviceId(publicKeySpkiB64: string): Promise<string> 
   return b64url(await sha256(b64urlDecode(publicKeySpkiB64)));
 }
 
+/** Display fingerprints are derived, never accepted from an untrusted peer. */
+export async function publicKeyFingerprint(publicKeySpkiB64: string): Promise<string> {
+  const hex = toHex(await sha256(b64urlDecode(publicKeySpkiB64))).toUpperCase();
+  return hex.match(/.{2}/g)!.join(':');
+}
+
 export async function importVerifyKey(spkiB64: string): Promise<CryptoKey> {
   return crypto.subtle.importKey(
     'spki',

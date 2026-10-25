@@ -24,13 +24,16 @@
     "dist:win": "node scripts/build.mjs && electron-builder --win nsis portable --publish never",
     "dist:mac": "node scripts/build.mjs && electron-builder --mac dmg zip --publish never",
     "test:desktop": "node scripts/build.mjs && playwright test -c e2e-desktop/playwright.desktop.config.ts",
-    "version:sync": "node scripts/sync-version.mjs"
+    "version:sync": "node scripts/sync-version.mjs",
+    "ios:sync": "node scripts/sync-ios.mjs",
+    "android:sync": "node scripts/sync-android.mjs"
   },
   "dependencies": {
     "@capacitor/android": "^6.2.2",
     "@capacitor/app": "^6.0.3",
     "@capacitor/core": "^6.2.2",
     "@capacitor/filesystem": "^6.0.4",
+    "@capacitor/ios": "^6.2.2",
     "@capacitor/share": "^6.0.4",
     "qrcode-generator": "^1.5.2",
     "ws": "^8.22.0"

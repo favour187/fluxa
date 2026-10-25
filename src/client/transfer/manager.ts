@@ -31,7 +31,7 @@ export class TransferManager {
   private receives = new Map<string, ReceiveTask>();
   private activeReceive: ReceiveTask | null = null;
   private activeSend: SendTask | null = null;
-  private queue: File[][] = [];
+  private queue: SendTask[] = [];
   private closed = false;
 
   constructor(
@@ -50,9 +50,10 @@ export class TransferManager {
   /* Outbound                                                          */
   /* ---------------------------------------------------------------- */
 
-  send(files: File[]): SendTask {
+  send(files: File[], resume?: ManifestMsg): SendTask {
     const task = new SendTask(this.session, {
       files,
+      resume,
       peerName: this.session.peer.name,
       peerDeviceId: this.session.peer.deviceId,
       senderName: this.localDeviceName,
@@ -66,11 +67,9 @@ export class TransferManager {
     });
     this.sends.set(task.id, task);
     if (this.activeSend || !this.session.verified) {
-      this.queue.push(files);
-      if (!this.session.verified) {
-        // Should not happen: the UI gates sending on verification.
-        this.events.onUpdate(task);
-      }
+      // Keep the SAME task/id when queued. The old implementation created a
+      // second task on dequeue, leaving a permanent phantom activity row.
+      this.queue.push(task);
       return task;
     }
     this.activeSend = task;
@@ -79,9 +78,11 @@ export class TransferManager {
   }
 
   private startNextQueued(): void {
+    if (this.closed || !this.session.verified || this.activeSend) return;
     const next = this.queue.shift();
-    if (!next || this.closed || !this.session.verified) return;
-    this.send(next);
+    if (!next) return;
+    this.activeSend = next;
+    void next.run();
   }
 
   /* ---------------------------------------------------------------- */
@@ -95,7 +96,7 @@ export class TransferManager {
         return;
       }
       case 'accept':
-        this.sends.get(msg.transferId)?.handleAccept();
+        this.sends.get(msg.transferId)?.handleAccept(msg.resume);
         return;
       case 'decline':
         this.sends.get(msg.transferId)?.handleDecline(msg.reason ?? 'The receiving device declined the transfer');
@@ -104,7 +105,10 @@ export class TransferManager {
         this.sends.get(msg.transferId)?.handleChunkAck(msg.streamId, msg.bytes);
         return;
       case 'fileResult':
-        this.sends.get(msg.transferId)?.handleFileResult(msg.streamId, msg.ok, msg.error);
+        this.sends.get(msg.transferId)?.handleFileResult(msg.streamId, msg.ok, msg.sha256, msg.error);
+        return;
+      case 'doneAck':
+        this.sends.get(msg.transferId)?.handleDoneAck(msg.ok, msg.error);
         return;
       case 'fileEnd':
         this.receives.get(msg.transferId)?.handleFileEnd(msg.streamId, msg.sha256, msg.size);
@@ -123,13 +127,11 @@ export class TransferManager {
       }
       case 'error': {
         const receive = this.receives.get(msg.transferId ?? '');
-        if (msg.code === 'busy') {
-          this.events.onProtocolError('The other device is busy with another transfer', false);
-          this.activeSend?.handleRemoteError('The other device is busy with another transfer');
-        } else if (receive) {
-          void receive.fail(msg.message);
+        if (receive) {
+          void receive.fail(msg.message, 'failed', false); // report remote failure; do not echo it back
         } else {
-          this.activeSend?.handleRemoteError(msg.message);
+          const send = msg.transferId ? this.sends.get(msg.transferId) : undefined;
+          send?.handleRemoteError(msg.message);
           this.events.onProtocolError(msg.message, false);
         }
         return;
@@ -137,6 +139,9 @@ export class TransferManager {
       case 'hello':
       case 'helloAck':
         return; // handled by the peer session
+      case 'share':
+      case 'shareResult':
+        return; // handled by the separate content-sharing module
       default:
         this.events.onProtocolError(`Unexpected message: ${(msg as { t: string }).t}`, false);
     }

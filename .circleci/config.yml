@@ -465,6 +465,47 @@ jobs:
           paths:
             - artifacts
 
+  build-ios-simulator:
+    description: >-
+      Source-level iOS build on a real Mac. Produces an unsigned Simulator .app
+      for compile verification only: NOT an installable device IPA or App Store build.
+    executor: macos
+    steps:
+      - checkout
+      - restore_npm_cache:
+          platform: macos
+      - install_dependencies
+      - save_npm_cache:
+          platform: macos
+      - run:
+          name: Sync Capacitor plugins and build unsigned iOS Simulator app
+          command: |
+            set -euo pipefail
+            node scripts/sync-ios.mjs 2>&1 | tee ios-sync.log
+            xcodebuild -workspace ios/App/App.xcworkspace -scheme App \
+              -configuration Debug -sdk iphonesimulator \
+              -destination 'generic/platform=iOS Simulator' \
+              -derivedDataPath ios/DerivedData CODE_SIGNING_ALLOWED=NO \
+              build 2>&1 | tee ios-build.log
+            APP=ios/DerivedData/Build/Products/Debug-iphonesimulator/App.app
+            test -d "$APP"
+            test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$APP/Info.plist")" = 'com.fluxa.transfer'
+            test "$(/usr/libexec/PlistBuddy -c 'Print :CFBundleShortVersionString' "$APP/Info.plist")" = "$(node -p 'require("./package.json").version')"
+            mkdir -p ios-artifacts
+            ditto -c -k --keepParent "$APP" "ios-artifacts/Fluxa-$(node -p 'require("./package.json").version')-ios-simulator-unsigned.zip"
+            (cd ios-artifacts && shasum -a 256 *.zip > SHA256SUMS)
+      - fail_if_no_artifacts:
+          pattern: 'ios-artifacts/*.zip'
+      - store_artifacts:
+          path: ios-artifacts
+          destination: ios-simulator-unsigned
+      - store_artifacts:
+          path: ios-sync.log
+          destination: ios-sync.log
+      - store_artifacts:
+          path: ios-build.log
+          destination: ios-build.log
+
   build-android:
     executor: android
     steps:
@@ -707,13 +748,18 @@ workflows:
             branches:
               only: main
 
-  # Only runs when the pipeline is triggered with {"macos_runner": true}, which
-  # requires a plan that includes macOS executors. CI stays green on plans that
-  # do not, while the job itself is real rather than decorative.
+  # macOS executors require a plan with Mac minutes. This optional workflow
+  # compiles both desktop and iOS Simulator source without claiming signed apps.
   native-macos:
     when: << pipeline.parameters.macos_runner >>
     jobs:
       - build-macos:
+          filters:
+            branches:
+              only: main
+            tags:
+              only: /^v[0-9]+\.[0-9]+\.[0-9]+.*/
+      - build-ios-simulator:
           filters:
             branches:
               only: main

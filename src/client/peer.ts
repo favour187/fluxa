@@ -16,6 +16,8 @@
  */
 import {
   channelHelloSignInput,
+  deriveDeviceId,
+  publicKeyFingerprint,
   deriveSharedSecret,
   fingerprintFromSdp,
   generateEcdhKeyPair,
@@ -27,7 +29,7 @@ import {
   buildSasTranscript,
   exportPublicKeySpki,
 } from '../shared/crypto.js';
-import { decodeFrame, encodeChunk, encodeControl, type ControlMessage } from '../shared/protocol.js';
+import { decodeFrame, encodeChunk, encodeControl, PROTOCOL_VERSION, type ControlMessage } from '../shared/protocol.js';
 import type { Identity } from './identity.js';
 import type { PeerLink } from './signal.js';
 import type { Relay } from './direct.js';
@@ -251,7 +253,7 @@ export class PeerSession {
       );
       this.localHello = {
         t: 'hello',
-        v: 1,
+        v: PROTOCOL_VERSION,
         deviceId: this.identity.deviceId,
         publicKey: this.identity.publicKey,
         fingerprint: this.identity.fingerprint,
@@ -299,8 +301,16 @@ export class PeerSession {
     try {
       // 1. Pinned identity: the key must be the one the server authenticated for
       //    this pairing. A display name or a new key is never accepted here.
-      if (hello.deviceId !== this.peer.deviceId || hello.publicKey !== this.peer.publicKey) {
-        throw new Error('peer identity does not match the paired device');
+      if (hello.deviceId !== this.peer.deviceId || hello.publicKey !== this.peer.publicKey ||
+          await deriveDeviceId(hello.publicKey) !== hello.deviceId ||
+          await publicKeyFingerprint(hello.publicKey) !== hello.fingerprint) {
+        throw new Error('peer identity or fingerprint does not match the paired device');
+      }
+      // A previously trusted identity must not silently change after reconnect.
+      // Device ids already bind keys; compare both fields to defend against a
+      // corrupted local trust record or an inconsistent signalling server.
+      if (this.peer.fingerprint && this.peer.fingerprint !== hello.fingerprint) {
+        throw new Error('peer fingerprint changed during pairing');
       }
       // 2. DTLS binding: the fingerprint must be the one actually negotiated.
       const negotiated = this.remoteDtlsFingerprint();
@@ -359,7 +369,7 @@ export class PeerSession {
 
   /** Called when the local user confirms the 6-digit code matches. */
   confirmVerification(matches: boolean): void {
-    if (this.verifying) return;
+    if (this.verifying || this.state !== 'awaiting-verification' || !this.sas || !this.remoteHello || !this.localHello) return;
     this.verifying = true;
     if (!matches) {
       this.signal.verify?.(this.peer.connId, false);

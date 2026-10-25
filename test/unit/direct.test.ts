@@ -8,6 +8,7 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { decodeTicket, encodeTicket, describeTicket, type DirectTicket } from '../../src/client/direct.js';
+import { deriveDeviceId, exportPublicKeySpki, generateIdentityKeyPair, publicKeyFingerprint } from '../../src/shared/crypto.js';
 
 const identity = {
   deviceId: 'GqCtAFSvwvhB5y3brbN-BvUrXHYhZ5u-YP46pMRhxZQ', // derived from publicKey
@@ -42,6 +43,7 @@ a=candidate:1510613871 1 udp 41885439 198.51.100.9 61022 typ relay raddr 203.0.1
 
 const ticket: DirectTicket = {
   v: 1,
+  protocolVersion: 2,
   kind: 'offer',
   nonce: 'nonce-1234567890',
   sdp: { type: 'offer', sdp: realSdp },
@@ -113,12 +115,19 @@ test('the rebuilt session description keeps everything WebRTC needs', async () =
   assert.ok(!sdp.includes('a=candidate:'), 'candidates travel in their own list, not twice');
 });
 
-test('an older full-ticket code is still accepted', async () => {
-  const json = new TextEncoder().encode(JSON.stringify(ticket));
-  const payload = Buffer.from(json).toString('base64url');
-  const decoded = await decodeTicket(`FLX1p.${payload}`);
+test('full-ticket layout is accepted only with a valid identity and current protocol', async () => {
+  const pair = await generateIdentityKeyPair();
+  const publicKey = await exportPublicKeySpki(pair.publicKey);
+  const current = { ...ticket, identity: {
+    ...identity, publicKey, deviceId: await deriveDeviceId(publicKey),
+    fingerprint: await publicKeyFingerprint(publicKey),
+  } };
+  const code = (t: unknown) => `FLX1p.${Buffer.from(JSON.stringify(t)).toString('base64url')}`;
+  const decoded = await decodeTicket(code(current));
   assert.equal(decoded.nonce, ticket.nonce);
   assert.match(decoded.sdp.sdp, /a=ice-ufrag:4ZcD/);
+  await assert.rejects(() => decodeTicket(code(ticket)), /invalid device identity/i);
+  await assert.rejects(() => decodeTicket(code({ ...current, protocolVersion: 1 })), /incompatible transfer protocol/i);
 });
 
 test('describeTicket never leaks the payload', () => {

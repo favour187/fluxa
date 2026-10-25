@@ -1666,3 +1666,14 @@ html[data-reduced-motion='true'] .pulse-ring::after {
     min-height: 0;
   }
 }
+
+/* Explicit, permission-gated content sharing. Long untrusted text can never
+   force the panel wider than the viewport or be interpreted as markup. */
+.modal-share { max-width: min(520px, calc(100vw - 30px)); display: flex; flex-direction: column; gap: 10px; }
+.modal-share textarea, .modal-share input { width: 100%; max-width: 100%; box-sizing: border-box; }
+.share-preview { white-space: pre-wrap; overflow-wrap: anywhere; max-height: 10rem; overflow: auto; }
+.shared-section { border-top: 1px solid var(--border, #333847); margin-top: 20px; padding-top: 14px; }
+.shared-section .panel-head { margin-bottom: 10px; }
+.shared-items { list-style: none; margin: 0; padding: 0; display: grid; gap: 9px; }
+.shared-item { min-width: 0; padding: 12px; border-radius: 12px; background: rgba(125, 130, 220, .08); }
+.shared-item p { overflow-wrap: anywhere; margin: 6px 0; }

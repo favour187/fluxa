@@ -1,3 +1,4 @@
+declare const FLUXA_VERSION: string; // replaced from package.json by the browser bundler
 import { FluxaApp } from './app.js';
 import { FluxaUI } from './ui.js';
 
@@ -41,7 +42,7 @@ async function boot(): Promise<void> {
 
   // Debug/automation surface. Read-only: it cannot inject files or bypass verification.
   window.__fluxa = {
-    version: '0.1.0',
+    version: FLUXA_VERSION,
     identity: () => {
       const id = app.identity;
       return id ? { deviceId: id.deviceId, fingerprint: id.fingerprint, name: id.name, platform: id.platform } : null;
@@ -79,6 +80,27 @@ async function boot(): Promise<void> {
     app.joinWithCode(param);
     history.replaceState({}, '', location.pathname);
   }
+
+  // Real Android/iOS project URL schemes let an external camera or share sheet
+  // open a short pairing link in the installed app. SAS comparison remains
+  // mandatory; opening a URL alone never trusts a device.
+  try {
+    const { Capacitor } = await import('@capacitor/core');
+    if (Capacitor.isNativePlatform()) {
+      const { App } = await import('@capacitor/app');
+      const claim = (raw: string) => {
+        try {
+          const url = new URL(raw);
+          if (url.protocol !== 'fluxa:' || url.host !== 'pair') return;
+          const code = url.searchParams.get('code');
+          if (code && /^[A-Za-z0-9]{6}$/.test(code)) app.joinWithCode(code);
+        } catch { /* ignore malformed external links */ }
+      };
+      await App.addListener('appUrlOpen', ({ url }) => claim(url));
+      const launch = await App.getLaunchUrl();
+      if (launch?.url) claim(launch.url);
+    }
+  } catch { /* packaged app plugin unavailable; manual pairing still works */ }
 }
 
 void boot();

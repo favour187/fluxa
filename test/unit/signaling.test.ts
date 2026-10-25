@@ -7,9 +7,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import WebSocket from 'ws';
+import { PROTOCOL_VERSION } from '../../src/shared/protocol.js';
 import { startServer, type FluxaServer } from '../../src/server/index.js';
 import {
   deriveDeviceId,
+  publicKeyFingerprint,
   exportPublicKeySpki,
   generateIdentityKeyPair,
   signalingHelloSignInput,
@@ -77,6 +79,7 @@ class TestClient {
 interface TestIdentity {
   deviceId: string;
   publicKey: string;
+  fingerprint: string;
   name: string;
   platform: string;
   sign: (message: string) => Promise<string>;
@@ -88,13 +91,14 @@ async function makeIdentity(name: string): Promise<TestIdentity> {
   return {
     deviceId: await deriveDeviceId(publicKey),
     publicKey,
+    fingerprint: await publicKeyFingerprint(publicKey),
     name,
     platform: 'test',
     sign: (message: string) => signWithIdentity(pair.privateKey, message),
   };
 }
 
-async function connect(port: number, identity?: TestIdentity, opts: { corrupt?: boolean } = {}): Promise<TestClient> {
+async function connect(port: number, identity?: TestIdentity, opts: { corrupt?: boolean; turnAccessKey?: string } = {}): Promise<TestClient> {
   const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`);
   const client = new TestClient(socket);
   await new Promise<void>((resolve, reject) => {
@@ -106,9 +110,11 @@ async function connect(port: number, identity?: TestIdentity, opts: { corrupt?: 
     const signature = await identity.sign(signalingHelloSignInput(client.challenge, identity.deviceId));
     client.send({
       t: 'hello',
+      protocolVersion: PROTOCOL_VERSION,
+      ...(opts.turnAccessKey ? { turnAccessKey: opts.turnAccessKey } : {}),
       deviceId: opts.corrupt ? 'A'.repeat(43) : identity.deviceId,
       publicKey: identity.publicKey,
-      fingerprint: 'AA:BB',
+      fingerprint: identity.fingerprint,
       name: identity.name,
       platform: identity.platform,
       nonce: client.challenge,
@@ -142,6 +148,7 @@ test('hello with a forged signature or mismatched device id is rejected', async 
   const badSig = await connect(server.port);
   badSig.send({
     t: 'hello',
+    protocolVersion: PROTOCOL_VERSION,
     deviceId: identity.deviceId,
     publicKey: identity.publicKey,
     fingerprint: 'X',
@@ -157,6 +164,7 @@ test('hello with a forged signature or mismatched device id is rejected', async 
   const mismatched = await connect(server.port);
   mismatched.send({
     t: 'hello',
+    protocolVersion: PROTOCOL_VERSION,
     deviceId: 'B'.repeat(43),
     publicKey: identity.publicKey,
     fingerprint: 'X',
@@ -177,6 +185,7 @@ test('hello signed over the wrong challenge is rejected', async () => {
   const sig = await identity.sign(signalingHelloSignInput('some-old-challenge', identity.deviceId));
   client.send({
     t: 'hello',
+    protocolVersion: PROTOCOL_VERSION,
     deviceId: identity.deviceId,
     publicKey: identity.publicKey,
     fingerprint: 'X',
@@ -194,7 +203,7 @@ test('a valid hello is acknowledged with the negotiated configuration', async ()
   const client = await connect(server.port, await makeIdentity('valid'));
   const ready = await client.next('ready');
   assert.equal(typeof ready.connId, 'string');
-  assert.equal(ready.protocolVersion, 1);
+  assert.equal(ready.protocolVersion, PROTOCOL_VERSION);
   assert.ok(typeof ready.chunkSize === 'number');
   client.close();
 });
@@ -334,4 +343,82 @@ test('peers are told when the other device disconnects', async () => {
   const left = await a.next('peerLeft');
   assert.equal((left.peer as Record<string, string>).connId, b.connId);
   a.close();
+});
+
+test('old clients cannot authenticate a v2 signalling session', async () => {
+  const identity = await makeIdentity('old build');
+  const client = await connect(server.port);
+  client.send({
+    t: 'hello', protocolVersion: 1, deviceId: identity.deviceId, publicKey: identity.publicKey,
+    fingerprint: identity.fingerprint, name: identity.name, platform: identity.platform,
+    nonce: client.challenge, sig: await identity.sign(signalingHelloSignInput(client.challenge, identity.deviceId)),
+  });
+  assert.equal((await client.next('error')).code, 'incompatible_protocol');
+  client.close();
+});
+
+test('cross-origin signalling is LAN-only on an explicitly opted-in desktop broker', async () => {
+  async function attempt(port: number, origin: string): Promise<boolean> {
+    const socket = new WebSocket(`ws://127.0.0.1:${port}/ws`, { origin });
+    return new Promise((resolve) => {
+      socket.on('open', () => { socket.close(); resolve(true); });
+      socket.on('error', () => resolve(false));
+    });
+  }
+  // The normal server rejects another localhost port and *all* public sites.
+  assert.equal(await attempt(server.port, 'http://127.0.0.1:9102'), false);
+  assert.equal(await attempt(server.port, 'https://evil.example'), false);
+  const desktop = await startServer({ port: 0, host: '127.0.0.1', allowLanOrigins: true, log: () => {} });
+  try {
+    assert.equal(await attempt(desktop.port, 'http://127.0.0.1:9102'), true);
+    assert.equal(await attempt(desktop.port, 'http://192.168.1.23:9102'), true);
+    assert.equal(await attempt(desktop.port, 'https://evil.example'), false);
+    assert.equal(await attempt(desktop.port, 'http://8.8.8.8:9102'), false);
+  } finally { await desktop.close(); }
+});
+
+test('TURN credentials are expiring, per-session and hidden from public and unauthorised clients', async () => {
+  const { createHmac } = await import('node:crypto');
+  const secret = 'different-secret-from-the-access-key-0123456789';
+  const accessKey = 'operator-issued-relay-access-key-0123456789';
+  const relay = await startServer({
+    port: 0, host: '127.0.0.1', log: () => {},
+    iceServers: [{ urls: 'stun:example.com:3478' }],
+    turn: { urls: ['turn:example.com:3478'], secret, accessKey, ttlSeconds: 600 },
+  });
+  try {
+    const response = await fetch(`http://127.0.0.1:${relay.port}/api/config`);
+    const publicConfig = await response.json() as Record<string, unknown>;
+    assert.ok(!JSON.stringify(publicConfig).includes(secret));
+    assert.ok(!JSON.stringify(publicConfig).includes(accessKey));
+    assert.ok(!JSON.stringify(publicConfig).includes('turn:example'));
+
+    const unauthorised = await connect(relay.port, await makeIdentity('no key'));
+    const without = await unauthorised.next('ready');
+    assert.equal(without.turnRequired, true);
+    assert.equal((without.iceServers as unknown[]).length, 1);
+    unauthorised.close();
+    const incorrect = await connect(relay.port, await makeIdentity('wrong key'), { turnAccessKey: 'Z'.repeat(40) });
+    assert.equal((await incorrect.next('ready')).turnRequired, true);
+    incorrect.close();
+
+    const authorised = await connect(relay.port, await makeIdentity('member'), { turnAccessKey: accessKey });
+    const ready = await authorised.next('ready');
+    assert.equal(ready.turnRequired, false);
+    const servers = ready.iceServers as { urls: string | string[]; username?: string; credential?: string }[];
+    assert.equal(servers.length, 2);
+    const turn = servers[1]!;
+    assert.deepEqual(turn.urls, ['turn:example.com:3478']);
+    assert.equal(turn.credential, createHmac('sha1', secret).update(turn.username!).digest('base64'));
+    assert.ok(Number(turn.username!.split(':')[0]) > Date.now() / 1000);
+    assert.ok(!JSON.stringify(ready).includes(secret));
+    assert.ok(!JSON.stringify(ready).includes(accessKey));
+    authorised.close();
+  } finally { await relay.close(); }
+});
+
+test('server refuses reusable static TURN credentials', async () => {
+  await assert.rejects(() => startServer({ port: 0, host: '127.0.0.1',
+    iceServers: [{ urls: 'turn:example.com', username: 'shared', credential: 'shared-password' }],
+  }), /Static ICE credentials/);
 });

@@ -41,7 +41,7 @@ export const ACK_INTERVAL_BYTES = 256 * 1024;
 export const ACK_INTERVAL_MS = 100;
 export const MAX_UNACKED_BYTES = 8 * 1024 * 1024;
 
-export const PROTOCOL_VERSION = 1;
+export const PROTOCOL_VERSION = 2; // v1 cannot acknowledge durable, whole-transfer completion
 
 export const LIMITS = {
   maxFilesPerTransfer: 2000,
@@ -73,7 +73,25 @@ export interface FileDescriptor {
   relPath: string;
   size: number;
   mime: string;
+  /** SHA-256 of the whole file, committed before offering a resumable transfer. */
+  sha256?: string;
 }
+
+export interface ResumeOffset {
+  streamId: number;
+  offset: number;
+  prefixSha256: string;
+}
+
+export interface SharedContent {
+  t: 'share';
+  id: string;
+  kind: 'clipboard' | 'link' | 'session';
+  text: string;
+  title?: string;
+  url?: string;
+}
+
 
 export interface ManifestMsg {
   t: 'manifest';
@@ -86,15 +104,18 @@ export interface ManifestMsg {
 }
 
 export type ControlMessage =
-  | { t: 'hello'; v: number; deviceId: string; publicKey: string; name: string; platform: string; fingerprint: string; nonce: string; ephPub: string; sig: string }
+  | { t: 'hello'; v: number; deviceId: string; publicKey: string; fingerprint: string; dtls: string; nonce: string; ephPub: string; sig: string }
   | { t: 'helloAck'; v: number }
   | ManifestMsg
-  | { t: 'accept'; transferId: string }
+  | { t: 'accept'; transferId: string; resume?: ResumeOffset[] }
   | { t: 'decline'; transferId: string; reason?: string }
   | { t: 'chunkAck'; transferId: string; streamId: number; bytes: number }
   | { t: 'fileEnd'; transferId: string; streamId: number; sha256: string; size: number }
   | { t: 'fileResult'; transferId: string; streamId: number; ok: boolean; sha256?: string; error?: string }
   | { t: 'done'; transferId: string }
+  | { t: 'doneAck'; transferId: string; ok: boolean; error?: string }
+  | SharedContent
+  | { t: 'shareResult'; id: string; ok: boolean; reason?: string }
   | { t: 'cancel'; transferId: string; reason: string }
   | { t: 'error'; transferId?: string; code: string; message: string }
   | { t: 'ping'; ts: number }
@@ -179,17 +200,91 @@ export function decodeFrame(raw: ArrayBuffer | Uint8Array): DecodedFrame {
 
 const CONTROL_TYPES = new Set([
   'hello', 'helloAck', 'manifest', 'accept', 'decline', 'chunkAck', 'fileEnd',
-  'fileResult', 'done', 'cancel', 'error', 'ping', 'pong',
+  'fileResult', 'done', 'doneAck', 'share', 'shareResult', 'cancel', 'error', 'ping', 'pong',
 ]);
 
+const transferId = (x: unknown): boolean => typeof x === 'string' && /^[0-9a-f]{32}$/.test(x);
+const digest = (x: unknown): boolean => typeof x === 'string' && /^[0-9a-f]{64}$/.test(x);
+const stream = (x: unknown): boolean => Number.isInteger(x) && Number(x) > 0 && Number(x) <= 0xffffffff;
+const offset = (x: unknown): boolean => Number.isSafeInteger(x) && Number(x) >= 0 && Number(x) <= LIMITS.maxFileBytes;
+const string = (x: unknown, max: number): boolean => typeof x === 'string' && x.length <= max;
+
+/** Validation BEFORE dispatch: a malformed authenticated peer must not mutate
+ * task state, acknowledge phantom bytes, or crash an event handler. */
 export function assertControlMessage(value: unknown): ControlMessage {
-  if (!value || typeof value !== 'object') throw new ProtocolError('control payload is not an object');
+  if (!value || typeof value !== 'object' || Array.isArray(value)) throw new ProtocolError('control payload is not an object');
   const msg = value as Record<string, unknown>;
   const t = msg['t'];
   if (typeof t !== 'string' || !CONTROL_TYPES.has(t)) {
     throw new ProtocolError(`unknown control message type: ${String(t)}`, 'unknown_control');
   }
+  let ok = true;
+  switch (t) {
+    case 'hello':
+      ok = msg['v'] === PROTOCOL_VERSION &&
+        string(msg['deviceId'], 80) && string(msg['publicKey'], 400) &&
+        string(msg['fingerprint'], 100) && string(msg['dtls'], 100) &&
+        string(msg['nonce'], 100) && string(msg['ephPub'], 400) && string(msg['sig'], 200);
+      break;
+    case 'helloAck': ok = msg['v'] === PROTOCOL_VERSION; break;
+    case 'manifest':
+      ok = transferId(msg['transferId']) && msg['v'] === PROTOCOL_VERSION &&
+        Array.isArray(msg['files']) && msg['files'].length <= LIMITS.maxFilesPerTransfer &&
+        Number.isSafeInteger(msg['totalBytes']) && Number(msg['totalBytes']) >= 0 && Number(msg['totalBytes']) <= LIMITS.maxTransferBytes &&
+        string(msg['senderName'], 100) && Number.isSafeInteger(msg['createdAt']);
+      // The size/paths/streams/hashes of each descriptor are checked by the manager.
+      break;
+    case 'accept':
+      ok = transferId(msg['transferId']) && (msg['resume'] === undefined || (
+        Array.isArray(msg['resume']) && msg['resume'].length <= LIMITS.maxFilesPerTransfer &&
+        msg['resume'].every((r: unknown) => {
+          const v = r as Record<string, unknown>;
+          return v && stream(v['streamId']) && offset(v['offset']) && digest(v['prefixSha256']);
+        })
+      ));
+      break;
+    case 'decline': ok = transferId(msg['transferId']) && (msg['reason'] === undefined || string(msg['reason'], 512)); break;
+    case 'chunkAck': ok = transferId(msg['transferId']) && stream(msg['streamId']) && offset(msg['bytes']); break;
+    case 'fileEnd': ok = transferId(msg['transferId']) && stream(msg['streamId']) && offset(msg['size']) && digest(msg['sha256']); break;
+    case 'fileResult':
+      ok = transferId(msg['transferId']) && stream(msg['streamId']) && typeof msg['ok'] === 'boolean' &&
+        (msg['sha256'] === undefined || digest(msg['sha256'])) &&
+        (msg['error'] === undefined || string(msg['error'], 512));
+      break;
+    case 'done': ok = transferId(msg['transferId']); break;
+    case 'doneAck': ok = transferId(msg['transferId']) && typeof msg['ok'] === 'boolean' &&
+      (msg['error'] === undefined || string(msg['error'], 512)); break;
+    case 'share': ok = validateSharedContent(msg).ok; break;
+    case 'shareResult': ok = transferId(msg['id']) && typeof msg['ok'] === 'boolean' &&
+      (msg['reason'] === undefined || string(msg['reason'], 512)); break;
+    case 'cancel': ok = transferId(msg['transferId']) && string(msg['reason'], 512); break;
+    case 'error': ok = (msg['transferId'] === undefined || transferId(msg['transferId'])) &&
+      string(msg['code'], 80) && string(msg['message'], 512); break;
+    case 'ping': case 'pong': ok = Number.isSafeInteger(msg['ts']); break;
+  }
+  if (!ok) throw new ProtocolError(`invalid ${t} control message`, 'bad_control');
   return value as ControlMessage;
+}
+
+export function validateSharedContent(value: unknown): { ok: boolean; reason?: string } {
+  if (!value || typeof value !== 'object') return { ok: false, reason: 'invalid payload' };
+  const v = value as Record<string, unknown>;
+  if (!transferId(v['id']) || !['clipboard', 'link', 'session'].includes(String(v['kind']))) {
+    return { ok: false, reason: 'invalid content identity or kind' };
+  }
+  if (!string(v['text'], 16_384) || new TextEncoder().encode(v['text'] as string).length > 16_384 ||
+      !string(v['title'] ?? '', 256) || !string(v['url'] ?? '', 2048)) {
+    return { ok: false, reason: 'content exceeds limit' };
+  }
+  if (v['kind'] !== 'clipboard') {
+    try {
+      const url = new URL(String(v['url']));
+      if (!['http:', 'https:'].includes(url.protocol) || url.username || url.password) throw Error();
+    } catch {
+      return { ok: false, reason: 'only public http(s) links without credentials are allowed' };
+    }
+  } else if (!v['text']) return { ok: false, reason: 'empty clipboard' };
+  return { ok: true };
 }
 
 /* ------------------------------------------------------------------ *
@@ -213,6 +308,9 @@ export function validateManifest(
   if (typeof msg.transferId !== 'string' || !/^[0-9a-f]{32}$/.test(msg.transferId)) {
     errors.push('invalid transferId');
   }
+  if (typeof msg.senderName !== 'string' || msg.senderName.length > 100) errors.push('invalid senderName');
+  if (!Number.isSafeInteger(msg.createdAt)) errors.push('invalid createdAt');
+  if (!Number.isSafeInteger(msg.totalBytes) || msg.totalBytes < 0) errors.push('invalid totalBytes');
   if (!Array.isArray(msg.files) || msg.files.length === 0) errors.push('manifest has no files');
   if (Array.isArray(msg.files) && msg.files.length > LIMITS.maxFilesPerTransfer) {
     errors.push(`too many files (${msg.files.length})`);
@@ -251,21 +349,31 @@ export function validateManifest(
       errors.push(`file name rejected: ${String(f.name ?? '').slice(0, 64)}`);
       continue;
     }
-    if (seenPaths.has(safe.relPath)) {
+    if (typeof f.name !== 'string' || typeof f.relPath !== 'string' || safe.name !== f.name || safe.relPath !== f.relPath) {
+      errors.push('non-canonical file name or path');
+      continue;
+    }
+    if (f.sha256 !== undefined && !digest(f.sha256)) {
+      errors.push('invalid file SHA-256 commitment');
+      continue;
+    }
+    if (seenPaths.has(safe.relPath.toLowerCase())) {
       errors.push(`duplicate path ${safe.relPath}`);
       continue;
     }
-    seenPaths.add(safe.relPath);
+    seenPaths.add(safe.relPath.toLowerCase());
     files.push({
       streamId: f.streamId,
       name: safe.name,
       relPath: safe.relPath,
       size: f.size,
-      mime: typeof f.mime === 'string' ? f.mime.slice(0, 255) : 'application/octet-stream',
+      mime: typeof f.mime === 'string' && f.mime.length <= 255 ? f.mime : 'application/octet-stream',
+      ...(f.sha256 ? { sha256: f.sha256 } : {}),
     });
   }
 
   if (total > LIMITS.maxTransferBytes) errors.push('transfer exceeds the total size limit');
+  if (files.some((f) => Boolean(f.sha256)) && files.some((f) => !f.sha256)) errors.push('mixed hashed and unhashed files');
   if (typeof msg.totalBytes === 'number' && msg.totalBytes !== total) {
     errors.push(`manifest totalBytes (${msg.totalBytes}) does not match file sizes (${total})`);
   }

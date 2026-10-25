@@ -31,6 +31,11 @@ export interface DesktopBridge {
   onNearby(callback: (peers: NearbyPeer[]) => void): () => void;
   notify(title: string, body: string): Promise<{ ok: boolean }>;
   saveDialog(name: string): Promise<{ canceled: boolean; filePath: string | null }>;
+  beginSave(filePath: string, size: number): Promise<{ ok: boolean; token?: string; error?: string }>;
+  writeSave(token: string, offset: number, bytes: Uint8Array): Promise<{ ok: boolean; bytes?: number; error?: string }>;
+  commitSave(token: string, sha256: string): Promise<{ ok: boolean; filePath?: string; bytes?: number; error?: string }>;
+  abortSave(token: string): Promise<{ ok: boolean }>;
+  /** Limited compatibility adapter; new exports always use the streaming API. */
   saveFile(filePath: string, bytes: Uint8Array): Promise<{ ok: boolean; filePath?: string; bytes?: number; error?: string }>;
   logLines(): Promise<string[]>;
 }

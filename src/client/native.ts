@@ -1,34 +1,24 @@
-/**
- * Native (Android) file handling.
- *
- * Inside the Capacitor WebView an anchor download does nothing, so a received
- * file used to exist only in the app's memory: "Save" was a no-op. Here the bytes
- * are written through the native filesystem plugin into the app's Documents
- * directory (no storage permission needed on any supported API level), and then
- * handed to the Android share sheet so they can go straight into another app.
- *
- * Kept in its own module and imported lazily so the browser and desktop bundles
- * never pay for the Capacitor plugins.
+/** Capacitor Android/iOS adapter. Unlike the old blob.arrayBuffer() + base64
+ * implementation, this reads and writes at most 64 KiB at a time. A random
+ * export directory per user action avoids implicit overwrites and preserves
+ * relative folder paths. The user can then use the OS share sheet / Files app.
+ * The verified receive copy remains in OPFS if the platform supports it.
  */
+import { randomToken } from '../shared/crypto.js';
+import { sanitizeRelPath } from '../shared/filename.js';
+import { Sha256 } from './sha256.js';
 
-export interface NativeAvailability {
-  available: boolean;
-  platform: string;
-}
+export interface NativeAvailability { available: boolean; platform: string }
 
 interface FilesystemModule {
   Filesystem: {
-    writeFile: (options: {
-      path: string;
-      data: string;
-      directory: string;
-      recursive?: boolean;
-    }) => Promise<{ uri: string }>;
+    writeFile: (options: { path: string; data: string; directory: string; recursive?: boolean }) => Promise<unknown>;
+    appendFile: (options: { path: string; data: string; directory: string }) => Promise<unknown>;
+    deleteFile: (options: { path: string; directory: string }) => Promise<unknown>;
     getUri: (options: { path: string; directory: string }) => Promise<{ uri: string }>;
   };
   Directory: { Documents: string };
 }
-
 interface ShareModule {
   Share: {
     canShare: () => Promise<{ value: boolean }>;
@@ -37,7 +27,6 @@ interface ShareModule {
 }
 
 let capacitor: { isNativePlatform: () => boolean; getPlatform: () => string } | null = null;
-
 async function core() {
   if (capacitor) return capacitor;
   const mod = (await import('@capacitor/core')) as unknown as {
@@ -51,28 +40,14 @@ export async function nativeAvailability(): Promise<NativeAvailability> {
   try {
     const cap = await core();
     return { available: cap.isNativePlatform(), platform: cap.getPlatform() };
-  } catch {
-    return { available: false, platform: 'web' };
-  }
+  } catch { return { available: false, platform: 'web' }; }
 }
 
 function toBase64(bytes: Uint8Array): string {
+  // Chunk size is strictly bounded by the caller: do not concatenate a Blob.
   let binary = '';
-  const chunk = 0x8000;
-  for (let i = 0; i < bytes.length; i += chunk) {
-    binary += String.fromCharCode(...bytes.subarray(i, i + chunk));
-  }
+  for (let i = 0; i < bytes.length; i += 0x8000) binary += String.fromCharCode(...bytes.subarray(i, i + 0x8000));
   return btoa(binary);
-}
-
-/** Filesystem-safe name: no separators, no traversal, no control characters. */
-function safeName(name: string): string {
-  const cleaned = name
-    .replace(/[/\\]/g, '_')
-    .replace(/[\u0000-\u001f\u007f]/g, '')
-    .replace(/^\.+/, '')
-    .trim();
-  return cleaned.slice(0, 120) || 'fluxa-file';
 }
 
 export interface NativeSaveResult {
@@ -83,70 +58,82 @@ export interface NativeSaveResult {
   error?: string;
 }
 
-/**
- * Writes the file into the app's Documents directory and offers it to the share
- * sheet. Returns the URI so the UI can tell the user exactly where it went.
- */
 export async function saveFileNative(
-  name: string,
-  blob: Blob,
-  options: { share?: boolean } = {},
+  relPath: string, blob: Blob, transferId: string,
+  options: { share?: boolean; sha256?: string } = {},
 ): Promise<NativeSaveResult> {
+  let path: string | null = null;
+  let module: FilesystemModule | null = null;
   try {
-    const [{ Filesystem, Directory }, cap] = await Promise.all([
-      import('@capacitor/filesystem') as unknown as Promise<FilesystemModule>,
-      core(),
-    ]);
+    const cap = await core();
     if (!cap.isNativePlatform()) return { ok: false, error: 'not a native platform' };
-
-    const path = safeName(name);
-    const bytes = new Uint8Array(await blob.arrayBuffer());
-    await Filesystem.writeFile({
-      path,
-      data: toBase64(bytes),
-      directory: Directory.Documents,
-      recursive: true,
-    });
+    const name = relPath.split('/').at(-1) ?? '';
+    const safe = sanitizeRelPath(name, relPath);
+    if (!safe || safe.relPath !== relPath || !/^[0-9a-f]{32}$/.test(transferId)) {
+      return { ok: false, error: 'invalid export path' };
+    }
+    module = (await import('@capacitor/filesystem')) as unknown as FilesystemModule;
+    const { Filesystem, Directory } = module;
+    // Each save action has its own never-before-used directory, even if an older
+    // export of the same file is already in Documents. No silent overwrite.
+    path = `Fluxa/${transferId}-${randomToken(8)}/${safe.relPath}`;
+    const reader = blob.stream().getReader();
+    const hasher = new Sha256();
+    let written = 0;
+    let created = false;
+    try {
+      for (;;) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        if (!value) continue;
+        for (let at = 0; at < value.byteLength; at += 64 * 1024) {
+          const chunk = value.subarray(at, at + 64 * 1024);
+          hasher.update(chunk);
+          const data = toBase64(chunk);
+          if (!created) {
+            await Filesystem.writeFile({ path, data, directory: Directory.Documents, recursive: true });
+            created = true;
+          } else await Filesystem.appendFile({ path, data, directory: Directory.Documents });
+          written += chunk.byteLength;
+        }
+      }
+      if (!created) await Filesystem.writeFile({ path, data: '', directory: Directory.Documents, recursive: true });
+      if (written !== blob.size || (options.sha256 && options.sha256 !== hasher.digestHex())) {
+        throw new Error('Saved file failed size or SHA-256 validation');
+      }
+    } finally { reader.releaseLock(); }
     const { uri } = await Filesystem.getUri({ path, directory: Directory.Documents });
-
     let shared = false;
     if (options.share !== false) {
       try {
         const { Share } = (await import('@capacitor/share')) as unknown as ShareModule;
-        const can = await Share.canShare();
-        if (can.value) {
-          await Share.share({ title: name, url: uri, dialogTitle: `Share ${name}` });
+        if ((await Share.canShare()).value) {
+          await Share.share({ title: safe.name, url: uri, dialogTitle: `Export ${safe.name}` });
           shared = true;
         }
-      } catch {
-        /* no share target installed — the file is still on disk */
-      }
+      } catch { /* no share target or the user cancelled; the file remains in Documents */ }
     }
     return { ok: true, uri, path, shared };
   } catch (error) {
+    if (module && path) {
+      await module.Filesystem.deleteFile({ path, directory: module.Directory.Documents }).catch(() => undefined);
+    }
     return { ok: false, error: (error as Error).message };
   }
 }
 
-/** Lets the UI decide whether to show a "Share" affordance. */
 export async function canShareNatively(): Promise<boolean> {
   try {
-    const cap = await core();
-    if (!cap.isNativePlatform()) return false;
+    if (!(await core()).isNativePlatform()) return false;
     const { Share } = (await import('@capacitor/share')) as unknown as ShareModule;
     return (await Share.canShare()).value;
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }
 
-/** Opens the OS share sheet for an already-saved file. */
 export async function shareSavedFile(name: string, uri: string): Promise<boolean> {
   try {
     const { Share } = (await import('@capacitor/share')) as unknown as ShareModule;
-    await Share.share({ title: name, url: uri, dialogTitle: `Share ${name}` });
+    await Share.share({ title: name, url: uri, dialogTitle: `Export ${name}` });
     return true;
-  } catch {
-    return false;
-  }
+  } catch { return false; }
 }

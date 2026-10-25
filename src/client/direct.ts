@@ -18,7 +18,11 @@
  * share sheet. They are *not* secret: they contain SDP and public keys only.
  */
 
+import { deriveDeviceId, fingerprintFromSdp, publicKeyFingerprint } from '../shared/crypto.js';
+import { PROTOCOL_VERSION } from '../shared/protocol.js';
+
 const TICKET_PREFIX = 'FLX1';
+const MAX_JSON_BYTES = 256 * 1024;
 const MAX_TICKET_CHARS = 64 * 1024;
 
 /**
@@ -30,6 +34,7 @@ const MAX_TICKET_CHARS = 64 * 1024;
  */
 interface CompactTicket {
   k: 'o' | 'a';
+  p: number; // transfer protocol version; ticket format v1 is independent
   n: string;
   nm: string;
   /** Public key: the 64-byte P-256 point only (the SPKI header is constant). */
@@ -66,6 +71,7 @@ export interface DirectIdentity {
 
 export interface DirectTicket {
   v: 1;
+  protocolVersion: number;
   kind: 'offer' | 'answer';
   /** Shared session nonce; both sides must agree on it (it is signed in the hello). */
   nonce: string;
@@ -107,8 +113,22 @@ async function inflate(bytes: Uint8Array): Promise<Uint8Array | null> {
   if (typeof DecompressionStream !== 'function') return null;
   try {
     const stream = new Blob([bytes as unknown as BlobPart]).stream().pipeThrough(new DecompressionStream('deflate-raw'));
-    return new Uint8Array(await new Response(stream).arrayBuffer());
-  } catch {
+    const reader = stream.getReader();
+    const parts: Uint8Array[] = [];
+    let length = 0;
+    for (;;) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      length += value.byteLength;
+      if (length > MAX_JSON_BYTES) { await reader.cancel(); throw new Error('Pairing code expands beyond the safe limit'); }
+      parts.push(value);
+    }
+    const out = new Uint8Array(length);
+    let at = 0;
+    for (const part of parts) { out.set(part, at); at += part.length; }
+    return out;
+  } catch (error) {
+    if ((error as Error).message.includes('safe limit')) throw error;
     return null;
   }
 }
@@ -134,8 +154,10 @@ function packCandidate(candidate: string): string {
 /** Rebuilds a full candidate line from the packed form. */
 function unpackCandidate(packed: string, index: number): RTCIceCandidateInit | null {
   const [address, port, code] = packed.split('|');
-  if (!address || !port) return null;
-  const type = CODE_TYPE[code ?? 'h'] ?? 'host';
+  if (!address || !port || packed.split('|').length !== 3 ||
+      !/^[A-Za-z0-9.:_-]{1,255}$/.test(address) || !Number.isInteger(Number(port)) ||
+      Number(port) < 1 || Number(port) > 65535 || !CODE_TYPE[code ?? '']) return null;
+  const type = CODE_TYPE[code!]!;
   const priority = PRIORITY[type] ?? PRIORITY.host!;
   return {
     candidate: `candidate:${index + 1} 1 udp ${priority} ${address} ${port} typ ${type}`,
@@ -187,6 +209,7 @@ function toCompact(ticket: DirectTicket): CompactTicket {
   const sctp = Number(sdpValue(sdp, 'sctp-port'));
   return {
     k: ticket.kind === 'offer' ? 'o' : 'a',
+    p: ticket.protocolVersion,
     n: ticket.nonce,
     nm: ticket.identity.name.slice(0, 24),
     pk: packPublicKey(ticket.identity.publicKey),
@@ -205,25 +228,39 @@ function hexToBytes(hex: string): Uint8Array {
 }
 
 async function fromCompact(compact: CompactTicket): Promise<DirectTicket> {
-  if (!compact.pk || !compact.u || !compact.w || !compact.f) throw new Error('Pairing code is incomplete');
-  const { deriveDeviceId, b64urlDecode, sha256, toHex } = await import('../shared/crypto.js');
+  if (compact.p !== PROTOCOL_VERSION) throw new Error('That direct code uses an incompatible transfer protocol; update both devices');
+  if (compact.k !== 'o' && compact.k !== 'a' || !Array.isArray(compact.c) || compact.c.length > 200 ||
+      !/^[A-Za-z0-9_-]{16,100}$/.test(compact.n) ||
+      !/^[A-Za-z0-9+/_-]{4,256}$/.test(compact.u) ||
+      !/^[A-Za-z0-9+/_-]{16,256}$/.test(compact.w) ||
+      typeof compact.pk !== 'string' || compact.pk.length > 400 ||
+      typeof compact.f !== 'string' || fromBase64Url(compact.f).length !== 32 ||
+      typeof compact.nm !== 'string' || compact.nm.length > 48) {
+    throw new Error('Pairing code is incomplete or invalid');
+  }
   const publicKey = unpackPublicKey(compact.pk);
-  const hex = toHex(await sha256(b64urlDecode(publicKey))).toUpperCase();
+  const fingerprint = await publicKeyFingerprint(publicKey);
   const kind = compact.k === 'o' ? 'offer' : 'answer';
-  const rebuilt: CompactTicket = { ...compact, f: toHex(fromBase64Url(compact.f)) };
+  const rebuilt: CompactTicket = { ...compact, f: Array.from(fromBase64Url(compact.f), (x) => x.toString(16).padStart(2, '0')).join('') };
   return {
     v: 1,
+    protocolVersion: PROTOCOL_VERSION,
     kind,
     nonce: compact.n,
     sdp: { type: kind, sdp: rebuildSdp(kind, rebuilt) },
     identity: {
       deviceId: await deriveDeviceId(publicKey),
       publicKey,
-      fingerprint: hex.match(/.{2}/g)?.join(':') ?? hex,
+      fingerprint,
       name: compact.nm || 'device',
       platform: 'unknown',
     },
-    candidates: compact.c.map(unpackCandidate).filter((c): c is RTCIceCandidateInit => c !== null),
+    candidates: compact.c.map((c, i) => {
+      if (typeof c !== 'string') throw new Error('Invalid ICE candidate in pairing code');
+      const candidate = unpackCandidate(c, i);
+      if (!candidate) throw new Error('Invalid ICE candidate in pairing code');
+      return candidate;
+    }),
   };
 }
 
@@ -232,6 +269,7 @@ async function fromCompact(compact: CompactTicket): Promise<DirectTicket> {
  * `p` are still accepted when decoding so codes from older builds keep working.
  */
 export async function encodeTicket(ticket: DirectTicket): Promise<string> {
+  if (ticket.protocolVersion !== PROTOCOL_VERSION) throw new Error('Incompatible transfer protocol in pairing ticket');
   const json = new TextEncoder().encode(JSON.stringify(toCompact(ticket)));
   const packed = await deflate(json);
   if (packed) return `${TICKET_PREFIX}c.${toBase64Url(packed)}`;
@@ -251,6 +289,7 @@ export async function decodeTicket(input: string): Promise<DirectTicket> {
   if (marker === 'c' || marker === 'z') payload = await inflate(fromBase64Url(body));
   else if (marker === 'p') payload = fromBase64Url(body);
   if (!payload) throw new Error('This pairing code could not be read — copy the whole code and try again');
+  if (payload.byteLength > MAX_JSON_BYTES) throw new Error('Pairing code exceeds safe size');
 
   let parsed: Record<string, unknown>;
   try {
@@ -265,10 +304,18 @@ export async function decodeTicket(input: string): Promise<DirectTicket> {
     return fromCompact(parsed as unknown as CompactTicket);
   }
   const ticket = parsed as unknown as DirectTicket;
-  if (ticket.v !== 1) throw new Error('This pairing code comes from an unsupported version of Fluxa');
+  if (ticket.v !== 1 || ticket.protocolVersion !== PROTOCOL_VERSION) throw new Error('That direct code uses an incompatible transfer protocol; update both devices');
   if (ticket.kind !== 'offer' && ticket.kind !== 'answer') throw new Error('Pairing code has no usable session');
   if (!ticket.sdp?.sdp || !ticket.nonce) throw new Error('Pairing code is incomplete');
-  if (!ticket.identity?.publicKey || !ticket.identity.deviceId) throw new Error('Pairing code has no device identity');
+  if (!ticket.identity?.publicKey || !ticket.identity.deviceId ||
+      await deriveDeviceId(ticket.identity.publicKey) !== ticket.identity.deviceId ||
+      await publicKeyFingerprint(ticket.identity.publicKey) !== ticket.identity.fingerprint ||
+      ticket.sdp.type !== ticket.kind ||
+      !/^[A-Za-z0-9_-]{16,100}$/.test(ticket.nonce) ||
+      fingerprintFromSdp(ticket.sdp.sdp) === null ||
+      !Array.isArray(ticket.candidates) || ticket.candidates.length > 200) {
+    throw new Error('Pairing code has an invalid device identity or session');
+  }
   return ticket;
 }
 

@@ -38,6 +38,14 @@ const targets = [
     verify: (text) => text.includes(`versionName=${version}`) && text.includes(`versionCode=${versionCode}`),
   },
   {
+    file: 'ios/App/App.xcodeproj/project.pbxproj',
+    transform: (text) => text
+      .replace(/MARKETING_VERSION = [^;]+;/g, `MARKETING_VERSION = ${version};`)
+      .replace(/CURRENT_PROJECT_VERSION = [^;]+;/g, `CURRENT_PROJECT_VERSION = ${versionCode};`),
+    verify: (text) => text.includes(`MARKETING_VERSION = ${version};`) &&
+      text.includes(`CURRENT_PROJECT_VERSION = ${versionCode};`),
+  },
+  {
     file: 'android/app/src/main/res/values/strings.xml',
     transform: (text) =>
       text
