@@ -102,6 +102,8 @@ export class FluxaUI {
   private deferredVerifications = new Set<string>();
   private pairingModal: HTMLElement | null = null;
   private sawPairingCode = false;
+  /** Whether this dialog has already jumped to the Direct code tab by itself. */
+  private autoSwitchedDirect = false;
   private verifyModal: HTMLElement | null = null;
   private settingsModal: HTMLElement | null = null;
   private transferRows = new Map<string, TransferRow>();
@@ -846,6 +848,7 @@ export class FluxaUI {
 
     overlay.append(modal);
     this.pairingModal = modal;
+    this.autoSwitchedDirect = false;
     // If there is no signalling server, open straight into the mode that works.
     if (this.snapshot?.status === 'offline') selectTab('direct');
     else this.app.requestPairingCode();
@@ -959,6 +962,20 @@ export class FluxaUI {
     replyView.hidden = !hostWaiting;
   }
 
+  /**
+   * Moves the pairing dialog to the Direct code tab the first time we learn the
+   * server is unreachable. It only ever does this once per dialog: after that the
+   * user can look at the other tab without being bounced back.
+   */
+  private switchToDirectTab(): void {
+    const modal = this.pairingModal;
+    if (!modal || this.snapshot?.status !== 'offline' || this.autoSwitchedDirect) return;
+    this.autoSwitchedDirect = true;
+    if (this.snapshot?.direct) return;
+    const directTab = modal.querySelector<HTMLElement>('[data-pair-tab="direct"]');
+    if (directTab && !directTab.classList.contains('is-active')) directTab.click();
+  }
+
   private syncPairingModal(snapshot: AppSnapshot): void {
     if (!this.pairingModal) {
       this.sawPairingCode = false;
@@ -966,18 +983,26 @@ export class FluxaUI {
     }
     const codeNode = this.pairingModal.querySelector<HTMLElement>('[data-testid="pair-code"]');
     const qrNode = this.pairingModal.querySelector<HTMLElement>('.qr');
+    const qrWrap = this.pairingModal.querySelector<HTMLElement>('.qr-wrap');
     if (!codeNode || !qrNode) return;
     const pairing = snapshot.pairing;
     if (!pairing) {
-      codeNode.textContent = '······';
+      codeNode.textContent = '------';
+      codeNode.classList.add('is-pending');
       qrNode.replaceChildren();
+      if (qrWrap) qrWrap.hidden = !snapshot.status || snapshot.status !== 'online';
       // The code disappeared after being issued: the peer claimed it (or it was
       // cancelled), so this dialog has done its job. Remove only this dialog —
       // another one (e.g. verification) may already be on screen.
       if (this.sawPairingCode) this.closeModal(this.pairingModal);
+      // The server may have been unreachable from the start or only gave up a
+      // moment ago; either way, switch to the mode that needs no server.
+      this.switchToDirectTab();
       return;
     }
     this.sawPairingCode = true;
+    codeNode.classList.remove('is-pending');
+    if (qrWrap) qrWrap.hidden = false;
     codeNode.textContent = pairing.code.split('').join(' ');
     if (!qrNode.dataset.code || qrNode.dataset.code !== pairing.code) {
       qrNode.dataset.code = pairing.code;

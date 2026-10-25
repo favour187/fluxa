@@ -49,8 +49,8 @@ same profile are the *same* device and cannot pair with themselves).
 
 ```bash
 npm run check        # TypeScript, strict, no emit
-npm test             # build + 68 unit/integration tests (node:test)
-npm run test:e2e     # 14 Playwright tests: two real browsers, plus a no-server
+npm test             # build + 71 unit/integration tests (node:test)
+npm run test:e2e     # 15 Playwright tests: two real browsers, plus a no-server
                      # direct-pairing run and a 360×640 layout check
 npm run test:desktop # 4 Electron tests under Xvfb (bridge, mDNS, 1 MB transfer)
 npm audit --omit=dev # production dependency audit
@@ -133,7 +133,7 @@ content cannot load.
 | Mode | Needs | How it works |
 | --- | --- | --- |
 | **Same network** (default) | any Fluxa signalling server — the desktop app's embedded one, or `npm start` | 6-character code + QR, 2-minute TTL, single use |
-| **Direct code** | nothing | one device shows `FLX1…` (offer), the other reads it and shows `FLX1…` (reply), the first pastes the reply back. No server, no account, no network service. Tickets can be copied or sent with the system share sheet |
+| **Direct code** | nothing | one device shows an `FLX1…` code (~300 characters), the other shows the reply, the first pastes it back. No server, no account, no network service. Tickets can be copied or sent with the system share sheet |
 
 The direct flow pins each device's identity key from the ticket *before* the
 WebRTC channel opens, so the same signature + DTLS-binding + 6-digit

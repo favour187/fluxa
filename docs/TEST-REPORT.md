@@ -329,4 +329,27 @@ Two user-reported defects were fixed and are now covered by tests:
   drawn for payloads small enough to be safe. A new test asserts no horizontal
   overflow and no page overflow at 360×640, and that the pairing dialog fits.
 
-Test counts at this commit: **68 unit**, **14 browser E2E**, **4 desktop E2E**.
+Test counts at this commit: **71 unit**, **15 browser E2E**, **4 desktop E2E**.
+
+### 11.1 Second pass, from real phone screenshots
+
+Three defects were still visible on a real Android device and are fixed:
+
+* **The pairing code was unreadable in practice** (~1 kB of `FLX1z…`). The ticket
+  now carries only what the peer cannot derive: the ICE credentials, the DTLS
+  certificate fingerprint as 32 raw bytes, the public key as its 64-byte point,
+  and candidates packed as `address|port|type`. The session description is
+  rebuilt from those fields, the device id and fingerprint are re-derived from
+  the key, and the candidates are no longer duplicated inside the SDP as well.
+  A real ticket went from ~1060 to ~300 characters, and the reply is the same
+  size. Old full-ticket codes still decode.
+* **The "same network" tab was dead on a phone with no server**: it opened on
+  that tab, showed an empty code, a blank white QR square and an error. With no
+  server the dialog now opens (and switches, once) to Direct code, a pending code
+  reads as `------` instead of a fake code, and an empty QR frame is not drawn.
+  Switching tabs no longer bounces the user back.
+* **Every card on a phone was half width.** The phone breakpoint turned `.grid`
+  into a flex column, but `.grid` also sets `align-items: start`, so each panel
+  shrank to its content width. The grid is kept (one column) and only the order
+  changes; all panels now span the full width.
+

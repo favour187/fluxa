@@ -10,30 +10,59 @@ import assert from 'node:assert/strict';
 import { decodeTicket, encodeTicket, describeTicket, type DirectTicket } from '../../src/client/direct.js';
 
 const identity = {
-  deviceId: 'A'.repeat(43),
+  deviceId: 'GqCtAFSvwvhB5y3brbN-BvUrXHYhZ5u-YP46pMRhxZQ', // derived from publicKey
   name: 'Pocket Phone',
   platform: 'Android',
   publicKey: 'MFkwEwYHKoZIzj0CAQYIKoZIzj0DAQcDQgAE',
   fingerprint: 'ab'.repeat(32),
 };
 
+// Shaped like a real Chromium offer, including the noise that made the old
+// codes ~1000 characters long.
+const realSdp = `v=0
+o=- 4611731400430051336 2 IN IP4 127.0.0.1
+s=-
+t=0 0
+a=group:BUNDLE 0
+a=extmap-allow-mixed
+a=msid-semantic: WMS
+m=application 9 UDP/DTLS/SCTP webrtc-datachannel
+c=IN IP4 0.0.0.0
+a=ice-ufrag:4ZcD
+a=ice-pwd:x9c1R8Zg7Fh2Kk0Lm3Np6Qr1
+a=ice-options:trickle
+a=fingerprint:sha-256 7B:8A:19:2C:44:0D:5E:61:33:9F:AA:02:BC:11:7D:5C:1E:00:9A:3B:4C:5D:6E:7F:80:91:A2:B3:C4:D5:E6:F7
+a=setup:actpass
+a=mid:0
+a=sctp-port:5000
+a=max-message-size:262144
+a=candidate:1510613869 1 udp 2122260223 192.168.99.20 54321 typ host generation 0 ufrag 4ZcD network-id 1
+a=candidate:1510613870 1 udp 1686052607 203.0.113.7 54321 typ srflx raddr 192.168.99.20 rport 54321 generation 0 ufrag 4ZcD network-id 2
+a=candidate:1510613871 1 udp 41885439 198.51.100.9 61022 typ relay raddr 203.0.113.7 rport 54321 generation 0 ufrag 4ZcD network-id 1`.replace(/\n/g, '\r\n');
+
 const ticket: DirectTicket = {
   v: 1,
   kind: 'offer',
   nonce: 'nonce-1234567890',
-  sdp: { type: 'offer', sdp: 'v=0\r\no=- 1 1 IN IP4 127.0.0.1\r\nm=application 9 UDP/DTLS/SCTP webrtc-datachannel\r\n' },
+  sdp: { type: 'offer', sdp: realSdp },
   identity,
-  candidates: [{ candidate: 'candidate:1 1 udp 2130706431 192.168.99.20 54321 typ host', sdpMid: '0' }],
+  candidates: [
+    { candidate: 'candidate:1510613869 1 udp 2122260223 192.168.99.20 54321 typ host generation 0 ufrag 4ZcD network-id 1', sdpMid: '0' },
+    { candidate: 'candidate:1510613870 1 udp 1686052607 203.0.113.7 54321 typ srflx raddr 192.168.99.20 rport 54321 generation 0 ufrag 4ZcD network-id 2', sdpMid: '0' },
+  ],
 };
 
 test('a ticket round-trips through encode/decode', async () => {
   const encoded = await encodeTicket(ticket);
-  assert.match(encoded, /^FLX1[zp]\./);
+  assert.match(encoded, /^FLX1c\./);
   const decoded = await decodeTicket(encoded);
-  assert.deepEqual(decoded.sdp, ticket.sdp);
+  assert.equal(decoded.sdp.type, 'offer');
   assert.equal(decoded.nonce, ticket.nonce);
-  assert.deepEqual(decoded.identity, identity);
-  assert.equal(decoded.candidates.length, 1);
+  assert.equal(decoded.identity.publicKey, identity.publicKey);
+  assert.equal(decoded.identity.name, identity.name);
+  assert.equal(decoded.identity.deviceId, identity.deviceId, 'device id is re-derived from the key');
+  assert.equal(decoded.candidates.length, 2);
+  assert.match(decoded.candidates[0]!.candidate!, /192\.168\.99\.20 54321 typ host$/);
 });
 
 test('tickets survive the whitespace that copy/paste introduces', async () => {
@@ -56,13 +85,40 @@ test('a damaged code fails cleanly instead of throwing something opaque', async 
 test('a code with missing identity is refused', async () => {
   const broken = { ...ticket, identity: { ...identity, publicKey: '' } };
   const encoded = await encodeTicket(broken as DirectTicket);
-  await assert.rejects(() => decodeTicket(encoded), /no device identity/);
+  await assert.rejects(() => decodeTicket(encoded), /incomplete|device identity/);
 });
 
 test('the wrong kind of ticket is reported, not silently accepted', async () => {
   const answer = { ...ticket, kind: 'answer' as const };
   const decoded = await decodeTicket(await encodeTicket(answer));
   assert.equal(decoded.kind, 'answer');
+});
+
+test('the code is short enough to read off a screen', async () => {
+  const encoded = await encodeTicket(ticket);
+  // The old full-ticket encoding was ~1000+ characters for this same session.
+  assert.ok(encoded.length < 400, `code is ${encoded.length} characters`);
+});
+
+test('the rebuilt session description keeps everything WebRTC needs', async () => {
+  const decoded = await decodeTicket(await encodeTicket(ticket));
+  const sdp = decoded.sdp.sdp;
+  assert.match(sdp, /a=ice-ufrag:4ZcD/);
+  assert.match(sdp, /a=ice-pwd:x9c1R8Zg7Fh2Kk0Lm3Np6Qr1/);
+  assert.match(sdp, /a=fingerprint:sha-256 7B:8A:19:2C/);
+  assert.match(sdp, /a=setup:actpass/);
+  assert.match(sdp, /a=mid:0/);
+  assert.match(sdp, /a=sctp-port:5000/);
+  assert.match(sdp, /m=application 9 UDP\/DTLS\/SCTP webrtc-datachannel/);
+  assert.ok(!sdp.includes('a=candidate:'), 'candidates travel in their own list, not twice');
+});
+
+test('an older full-ticket code is still accepted', async () => {
+  const json = new TextEncoder().encode(JSON.stringify(ticket));
+  const payload = Buffer.from(json).toString('base64url');
+  const decoded = await decodeTicket(`FLX1p.${payload}`);
+  assert.equal(decoded.nonce, ticket.nonce);
+  assert.match(decoded.sdp.sdp, /a=ice-ufrag:4ZcD/);
 });
 
 test('describeTicket never leaks the payload', () => {

@@ -34,7 +34,9 @@ export async function pair(clients: Client[]): Promise<void> {
 
   await a.page.getByTestId('pair-button').click();
   const codeEl = a.page.getByTestId('pair-code');
-  await expect(codeEl).not.toHaveText(/^·+$/);
+  // Wait for a real code, not for the placeholder: the placeholder used to be
+  // dots but is now dashes, and matching "not dots" let a placeholder through.
+  await expect(codeEl).toHaveText(/^(?:[A-Z0-9] ?){6}$/);
   const code = (await codeEl.textContent())!.replace(/\s/g, '');
   expect(code).toHaveLength(6);
 

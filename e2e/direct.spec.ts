@@ -220,3 +220,48 @@ test('the whole app fits a phone screen with no sideways scrolling', async () =>
 
   await context.close();
 });
+
+test('on a phone the dialog opens on the code that works, with cards at full width', async () => {
+  const context = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const page = await context.newPage();
+  await page.goto(baseUrl, { waitUntil: 'domcontentloaded' });
+  await page.waitForFunction(() => Boolean((window as unknown as { __fluxa?: unknown }).__fluxa));
+
+  // Every card must use the full column width; a half-width card was what made
+  // the phone layout look broken.
+  await expect
+    .poll(async () =>
+      page.evaluate(() => {
+        const shell = document.querySelector('.app-shell')!.getBoundingClientRect().width;
+        const panels = [...document.querySelectorAll('.panel')].map((n) => n.getBoundingClientRect().width);
+        return panels.length > 0 && panels.every((w) => w > shell * 0.85);
+      }),
+    )
+    .toBe(true);
+
+  await page.getByTestId('pair-button').click();
+  // No signalling server exists here, so the dialog must land on Direct code
+  // instead of a permanently empty "same network" code.
+  await expect(page.getByTestId('pair-tab-direct')).toHaveClass(/is-active/);
+  await expect(page.getByTestId('pair-code')).toHaveClass(/is-pending/);
+  // A blank white QR frame used to sit in the middle of the dialog.
+  await expect(page.locator('[data-panel="code"] .qr-wrap')).toBeHidden();
+
+  // Looking at the other tab must not bounce the user back.
+  await page.getByTestId('pair-tab-code').click();
+  await expect(page.getByTestId('pair-tab-code')).toHaveClass(/is-active/);
+  await page.waitForTimeout(400);
+  await expect(page.getByTestId('pair-tab-code')).toHaveClass(/is-active/);
+  await expect(page.locator('#offline-notice')).toContainText('Direct code');
+
+  // The ticket itself must be short enough to read and copy on a phone.
+  await page.getByTestId('pair-tab-direct').click();
+  await page.getByTestId('direct-start').click();
+  const ticket = page.getByTestId('direct-ticket');
+  await expect(ticket).toBeVisible({ timeout: 30_000 });
+  const value = await ticket.inputValue();
+  expect(value).toMatch(/^FLX1/);
+  expect(value.length).toBeLessThan(700);
+
+  await context.close();
+});

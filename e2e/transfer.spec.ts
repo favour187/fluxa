@@ -238,7 +238,7 @@ test('sending is blocked until the peer is verified, and rejecting closes the se
   await renameDevice(c.page, 'Unverified Box');
 
   await a.page.getByTestId('pair-button').click();
-  await expect(a.page.getByTestId('pair-code')).not.toHaveText(/^·+$/);
+  await expect(a.page.getByTestId('pair-code')).toHaveText(/^(?:[A-Z0-9] ?){6}$/);
   const code = (await a.page.getByTestId('pair-code').textContent())!.replace(/\s/g, '');
   await c.page.getByTestId('pair-button').click();
   await c.page.getByTestId('join-code').fill(code);
