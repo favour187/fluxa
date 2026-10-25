@@ -935,7 +935,10 @@ export class FluxaUI {
   /** Remove a single dialog, leaving any other open dialog untouched. */
   private closeModal(modal: HTMLElement | null): void {
     modal?.remove();
-    if (modal === this.qrScanModal) this.stopQrScanner();
+    if (modal === this.qrScanModal) {
+      this.stopQrScanner();
+      if (this.pairingModal) this.pairingModal.hidden = false;
+    }
     if (modal === this.pairingModal) this.pairingModal = null;
     if (modal === this.verifyModal) {
       this.verifyModal = null;
@@ -1112,6 +1115,7 @@ export class FluxaUI {
     const overlay=this.openOverlay(),modal=el('div','modal modal-qr-scanner');
     modal.setAttribute('role','dialog');modal.setAttribute('aria-modal','true');modal.setAttribute('aria-label','Scan a Fluxa pairing QR code');modal.dataset.testid='qr-scanner-modal';
     modal.innerHTML=`<button class="modal-close" type="button" aria-label="Close QR scanner">×</button><span class="eyebrow">FLUXA SCANNER</span><h2>Point at the other screen</h2><p class="muted small">Keep the whole QR inside the frame. Fluxa will recognise the code and continue automatically.</p><div class="scanner-frame"><video autoplay muted playsinline data-testid="qr-scanner-video"></video><span class="scanner-corner tl"></span><span class="scanner-corner tr"></span><span class="scanner-corner bl"></span><span class="scanner-corner br"></span></div><p class="scanner-status muted small" data-testid="qr-scanner-status" aria-live="polite">Starting camera…</p><button class="btn btn-ghost" type="button" data-testid="qr-scanner-cancel">Cancel scan</button>`;
+    if (this.pairingModal) this.pairingModal.hidden = true;
     overlay.append(modal);this.qrScanModal=modal;
     modal.querySelector('.modal-close')!.addEventListener('click',()=>this.closeModal(modal));
     modal.querySelector('[data-testid="qr-scanner-cancel"]')!.addEventListener('click',()=>this.closeModal(modal));
