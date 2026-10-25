@@ -558,7 +558,8 @@ export class FluxaApp {
         },
         onControl: (msg) => {
           if (msg.t === 'chat') {
-            const active = box.entry?.session.verified && box.entry.session.state === 'connected';
+            const activeEntry = box.entry;
+            const active = Boolean(activeEntry?.session.verified && activeEntry.session.state === 'connected');
             if (!active) {
               box.entry?.session.sendControl({ t: 'chatAck', id: msg.id, ok: false, reason: 'Device is not verified' });
               return;

@@ -1721,3 +1721,14 @@ html[data-reduced-motion='true'] .pulse-ring::after {
 @media(prefers-reduced-motion:reduce){.stage.transfer-rippling:before,.stage.transfer-rippling:after{animation:none!important}}
 
 .edge-send-card.is-dragging{z-index:3;transition:none;box-shadow:0 16px 42px rgba(79,209,255,.16)}.edge-send-card.edge-ready{border-color:var(--brand-2);box-shadow:0 0 0 2px rgba(79,209,255,.2),0 16px 42px rgba(79,209,255,.18)}.edge-send-card{will-change:transform;transition:transform .12s ease,border-color .12s ease,box-shadow .12s ease}@media(prefers-reduced-motion:reduce){.edge-send-card{transition:none}}
+
+/* Direct pairing: scannable QR and readable, grouped fallback codes. */
+.modal-pair .ticket-input{font-family:var(--mono);font-size:clamp(12px,2.8vw,14px);line-height:1.85;letter-spacing:.025em;overflow-wrap:anywhere;word-break:break-word;min-height:92px;max-height:190px}
+.modal-pair [data-testid="direct-ticket-view"]{display:grid;gap:12px}
+.modal-pair [data-testid="direct-qr-wrap"]{display:grid;justify-items:center;gap:8px;padding:16px;border:1px solid var(--stroke);border-radius:18px;background:rgba(255,255,255,.025)}
+.modal-pair [data-testid="direct-qr"] canvas{display:block;width:min(100%,280px);height:auto;image-rendering:pixelated;border-radius:8px}
+.modal-pair .direct-actions{display:flex;flex-wrap:wrap;gap:8px}
+.modal-pair .direct-actions .btn{flex:1 1 auto;min-height:42px}
+.modal-pair [data-testid="direct-ticket-label"]{line-height:1.5}
+@media(max-width:480px){.modal-pair{width:min(100% - 20px,520px);padding:20px 16px}.modal-pair [data-testid="direct-qr-wrap"]{padding:12px}.modal-pair [data-testid="direct-qr"] canvas{width:min(100%,240px)}}
+@media(prefers-reduced-motion:reduce){.edge-send-card,.edge-send-card *{scroll-behavior:auto!important}}
