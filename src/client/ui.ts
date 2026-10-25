@@ -1117,9 +1117,10 @@ export class FluxaUI {
     modal.querySelector('[data-testid="qr-scanner-cancel"]')!.addEventListener('click',()=>this.closeModal(modal));
     const video=modal.querySelector<HTMLVideoElement>('video')!,status=modal.querySelector<HTMLElement>('[data-testid="qr-scanner-status"]')!;
     try{
-      this.qrScanStream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}}});
-      if(this.qrScanModal!==modal){this.qrScanStream.getTracks().forEach(t=>t.stop());this.qrScanStream=null;return;}
-      video.srcObject=this.qrScanStream;await video.play();const detector=new Detector({formats:['qr_code']});status.textContent='Camera ready — searching for a Fluxa QR…';
+      const stream=await navigator.mediaDevices.getUserMedia({audio:false,video:{facingMode:{ideal:'environment'},width:{ideal:1280},height:{ideal:720}}});
+      this.qrScanStream=stream;
+      if(this.qrScanModal!==modal){stream.getTracks().forEach(t=>t.stop());this.qrScanStream=null;return;}
+      video.srcObject=stream;await video.play();const detector=new Detector({formats:['qr_code']});status.textContent='Camera ready — searching for a Fluxa QR…';
       const scan=async():Promise<void>=>{if(this.qrScanModal!==modal)return;try{if(video.readyState>=2){const hits=await detector.detect(video),value=hits[0]?.rawValue;if(value){status.textContent='QR found — connecting…';this.closeModal(modal);await this.consumeScannedQr(value);return;}}}catch{status.textContent='Could not read that frame. Hold the QR steady and try again.';}if(this.qrScanModal===modal)this.qrScanFrame=requestAnimationFrame(()=>void scan());};
       this.qrScanFrame=requestAnimationFrame(()=>void scan());
     }catch{status.textContent='Camera permission was denied or the camera is busy. Allow camera access and try again, or enter the code manually.';this.app.toast('error','Fluxa could not open the camera. Check browser camera permission.');}
