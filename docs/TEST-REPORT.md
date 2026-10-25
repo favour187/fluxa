@@ -1,8 +1,14 @@
 # Fluxa 0.2.0 — verification and release-readiness record
 
-## Latest combined PR #4 + requested features (local, 2026-10-25)
+## Post-merge CI and Android hardware-filter correction (2026-10-25)
 
-This new work is on `work/all-features-and-pr4` in a **locally resolved but not-yet-published merge** of PR #4 into main `e310d7963d52`. PR #4's previous branch pipeline 38 failed on old typing/staged-send tests; those results are not a test of this combined tree. The records below supersede the older baseline section for current feature status. No CI, signed package, physical phone test or browser-store publication of this combined tree has been asserted.
+PR #4's combined feature commit `aff40bc` passed **all six** branch pipeline 39 jobs (validate, security, browser E2E, desktop E2E, web, Linux). PR #4 was **merged** as `393fa38f0559`; [main pipeline 40](https://app.circleci.com/pipelines/github/favour187/fluxa/40) passed **all nine** jobs, including Android, Windows and unsigned-mac package builds. PR #4's earlier pipeline 38 failures are historical and do not describe the merged code.
+
+Pipeline 40 Android job 331 produced an APK and AAB for **`393fa38`**, both release-signed and independently downloaded. The APK SHA-256 is `43c1e90164e5dfe2d7a06756435b7cbc548092d0198058cc886c820e3fa5c5de`; the AAB SHA-256 is `c0140d475fd0cdcf575d4abb7614a3f20d8e6f8310ef4b063e732459c2d52918`. Both match the CI manifest. Independent `apksigner verify` confirmed APK v1/v2 release signatures with one `CN=Fluxa, OU=Fluxa Releases` signer; `jarsigner -verify` verified the AAB JAR signature (self-signed release certificate, as expected for Android upload keys). **However**, compiled APK badging also revealed that `android.permission.CAMERA` silently implied a **required** `android.hardware.camera` feature despite optional `camera.any`. This would filter camera-less devices even though manual pairing works. The follow-up source marks all camera hardware optional and makes the CI Android job assert the *built* APK has no implied required camera. **Pipeline 40's signed artifact is not a corrected final package**; verify the follow-up revision's own APK/AAB after its CI build. No phone install, iOS Xcode build or store publication was performed.
+
+## Local feature verification before PR #4's remote merge
+
+The following checks were run on `work/all-features-and-pr4` before it was pushed. The Android-only follow-up later passed strict TypeScript, **94/94** Node/unit/extension tests, Android asset/plugin sync and version/whitespace checks; browser/desktop feature code was unchanged, and CI runs those suites again per pushed commit. The table records the original combined feature commit's local results.
 
 | Check | Observed result |
 | --- | --- |
@@ -10,7 +16,7 @@ This new work is on `work/all-features-and-pr4` in a **locally resolved but not-
 | `npm test` | **93/93 passed** Node/unit/security/extension-link checks. |
 | `npm run test:e2e` | **33/33 passed** Chromium browser E2E after the camera-policy assertion and early-stop media-negotiation fixes (~5.0 min). An earlier targeted QR run saw one transient pairing timeout; the complete 33-test rerun passed, and the boot-time pairing case passed 3/3 on an isolated repeat. Do not claim zero flakiness. |
 | `xvfb-run -a npm run test:desktop` | **6/6 passed** actual Linux Electron process E2E after the final changes (including a simulated canceled OS screen-picker request that settles cleanly). |
-| `npm run android:sync`, `npm run ios:sync` | Both passed after declaring optional Android CAMERA permission and iOS camera usage string, reporting Capacitor App, Clipboard, Filesystem and Share plugin registrations. Linux skipped CocoaPods/Xcode. No Android SDK/Gradle build or iOS compile of this tree. |
+| `npm run android:sync`, `npm run ios:sync` | Both passed after adding Android CAMERA permission and iOS camera usage string, reporting Capacitor App, Clipboard, Filesystem and Share plugin registrations. This source-only sync did **not** catch the later compiled APK's implied required camera feature. Linux skipped CocoaPods/Xcode. No Android SDK/Gradle build or iOS compile of this tree. |
 | `npm audit --omit=dev --audit-level=critical`; `git diff --check`; `node scripts/sync-version.mjs --check` | Passed; audit reported `found 0 vulnerabilities` in production dependencies at that run. |
 | Unpacked Chromium extension | Manifest V3 loaded in a headful Linux Chromium extension manager; the URL fragment/review flow passed browser E2E. Store signing and installed-app protocol dispatch in a real browser remain untested. |
 

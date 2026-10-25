@@ -46,9 +46,12 @@
     <!-- Permissions -->
 
     <uses-permission android:name="android.permission.INTERNET" />
-    <!-- Optional camera: requested only when the user taps Scan QR. Manual code remains available. -->
+    <!-- Only Scan QR requests CAMERA. Declare *every* implied camera feature
+         optional, or Play may exclude devices that pair using manual codes. -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-feature android:name="android.hardware.camera" android:required="false" />
     <uses-feature android:name="android.hardware.camera.any" android:required="false" />
+    <uses-feature android:name="android.hardware.camera.autofocus" android:required="false" />
     <uses-permission android:name="android.permission.ACCESS_NETWORK_STATE" />
     <uses-permission android:name="android.permission.ACCESS_WIFI_STATE" />
     <!-- mDNS discovery of desktop Fluxa instances on the same network. -->

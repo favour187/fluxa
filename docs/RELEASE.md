@@ -1,6 +1,6 @@
 # Build and release guide — Fluxa 0.2.0 / transfer protocol 2
 
-This guide describes reproducible builds. **For the combined PR #4 + feature tree, only web/source builds, Android/iOS asset/plugin syncs and Linux Electron E2E have run locally. New Android/desktop installer builds and target OS tests are outstanding.** Earlier PR #3 main pipeline 32 for `e310d79` produced genuinely release-signed APK/AAB files; old job 173 did too. Neither establishes signed output of this revision, real-device tests, store publication or production TURN. Run
+This guide describes reproducible builds. PR #4 merged as `393fa38`; its main pipeline 40 passed nine jobs and built release-signed Android APK/AAB plus unsigned desktop packages. **An independent APK badging check then found an implicitly required camera feature** that would exclude devices using manual pairing. This follow-up declares camera hardware optional and makes the compiled-APK CI check mandatory. Do not treat pipeline-40 binaries as packages containing that fix; check the follow-up commit's own pipeline, hashes and signing results. No physical device, iOS Xcode/IPA, browser-store release or production TURN was validated. Run
 `node scripts/sync-version.mjs --check` before every package build. Updates from
 protocol v1 must update both peers and the signalling broker together; old
 direct tickets and incomplete v1 journals cannot be reinterpreted as verified
@@ -35,10 +35,12 @@ npm run dist:linux      # unsigned AppImage and deb in release/
 ```
 
 A web ZIP is made by the `build-web` CI job. Linux packages need `electron-builder`
-and, for GUI smoke tests, Xvfb + GTK system libraries. Local `.deb`/AppImage builds and a packaged-binary smoke test were recorded
-in the **historical baseline** of [TEST-REPORT.md](TEST-REPORT.md), **not** for
-this combined feature tree. CI's baseline artifacts do **not** prove new
-unpublished changes passed CI.
+and, for GUI smoke tests, Xvfb + GTK system libraries. A local `.deb`/AppImage and packaged-binary smoke test are recorded in the
+**historical baseline** of [TEST-REPORT.md](TEST-REPORT.md). Pipeline 40 built
+unsigned Linux and Windows packages plus a Linux-cross-built unsigned macOS ZIP
+for merged source `393fa38`. These are CI build artifacts, **not** proof of
+installed target-OS compatibility, desktop code signing or notarisation. Check
+later commits separately.
 
 ## Windows and macOS desktop
 
@@ -50,7 +52,7 @@ secrets; never add it to the repository.
 
 On a Mac, `npm run dist:mac` builds dmg/zip. The CircleCI macOS job is optional
 (`macos_runner: true`) because the current plan may not have a Mac executor.
-The historical baseline included a Linux-produced **unsigned macOS x64 zip** (see TEST-REPORT); the combined feature tree has no new Mac package and no notarised or Mac-tested release.
+Pipeline 40 included a Linux-produced **unsigned macOS x64 zip** for the PR #4 merge (see TEST-REPORT); it is not a notarised or Mac-tested release.
 Normal distribution requires an Apple Developer ID certificate and notarisation
 with an actual developer account; no such signing/notarisation was performed here.
 
@@ -71,8 +73,11 @@ does not skip lint or release checks. On a normal machine the project defaults
 usually suffice. Release outputs are under `android/app/build/outputs/`.
 Without locally provisioned release credentials, `assembleRelease` writes an
 **unsigned** APK/AAB: `apksigner verify` fails for such a release APK and these
-are **not installable/distributable release packages**. No APK was built from
-this combined feature tree in this workspace. The Gradle debug keystore
+are **not installable/distributable release packages**. The merged feature tree
+was built in CircleCI (pipeline 40, job 331) with the real release signing key;
+no Android SDK APK was built *locally* in this workspace. Its compiled APK
+revealed an implied required camera; this follow-up must be built and checked
+before using an updated package. The Gradle debug keystore
 signs the `assembleDebug` APK, installable for **testing only** (not a Play upload
 certificate). This workspace did **not** install an APK on a device or run a
 mobile WebRTC scenario.
@@ -83,9 +88,16 @@ for old commit `e58c3ff` produced a signed release APK and AAB. Its public
 manifest records both as signed; independently downloaded APK hash
 `aa6a74c87e586cce85e488ce5643096cc31128e885046368c18d8919b9a32520`
 matched the manifest, and `apksigner verify --verbose --print-certs` verified
-v1 and v2 signatures from `CN=Fluxa, OU=Fluxa Releases`. This is **not** a signed
-build of the new combined revision. After an authorised push/merge, inspect that
-commit's own job manifest and verify its APK signature and AAB JAR signature.
+v1 and v2 signatures from `CN=Fluxa, OU=Fluxa Releases`. Pipeline 40's newer
+`393fa38` APK/AAB were also independently SHA-256 and signature verified, but
+packaged a required camera feature. Once the optional-camera follow-up is
+merged, inspect **its** manifest and verify both APK and AAB signatures and compiled feature flags independently.
+For example, `aapt2 dump badging Fluxa-0.2.0-release.apk` should list both
+`android.hardware.camera` and `android.hardware.camera.any` under
+`uses-feature-not-required`, and **must not** list an implied required camera.
+`apksigner verify --verbose --print-certs` verifies the APK signing schemes;
+`jarsigner -verify` verifies the AAB JAR signature. The signed pipeline-40
+artifact had matching hashes and signatures but **failed** the camera check.
 
 Keep the existing key **outside the repository**, in CI project secrets
 `FLUXA_ANDROID_KEYSTORE_B64`, `FLUXA_ANDROID_STORE_PASSWORD`,

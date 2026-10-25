@@ -28,7 +28,7 @@ This document preserves the product requirements for Fluxa. It is the target sco
 
 ## Verification checklist
 
-- [x] Final TypeScript, 93 Node/unit/extension-link, 33 Chromium E2E and six Linux Electron E2E passed locally after feature/race fixes.
+- [x] PR #4's merged feature tree passed 93 Node/unit/extension-link, 33 Chromium E2E and six Linux Electron E2E locally; its branch pipeline 39 passed six jobs, and main pipeline 40 passed nine. The optional-camera follow-up subsequently passed 94 unit tests and strict TypeScript; its own CI remains a separate gate.
 - [x] Two independent Chromium contexts pair, verify, exchange messages and transfer files; browser E2E also exercised clipboard, screen/video, handoff draft, QR and rules.
 - [ ] Same-LAN/hotspot path and phone-to-phone offline route are tested on real devices; no-internet claims remain limited to tested ICE conditions.
 - [ ] Edge swipe and CSS transfer ripple have automated browser coverage, but real touch/hardware timing and screen-reader usability need validation. Send now is the explicit button/keyboard fallback.
