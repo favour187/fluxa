@@ -221,8 +221,10 @@ test('the receiver never reports completion when the bytes were altered', async 
   h.wireAtoB.corruptStream = 1;
   const task = h.a.send([file('payload.bin', 300_000)]);
 
-  await waitFor(() => task.state !== 'transferring' && task.state !== 'waiting-approval', 20_000, 'sender settles');
+  // `send()` returns while hashing/preparing. A negated in-flight check can
+  // pass before the transfer even starts, then race the receiver's error reply.
   await waitFor(() => h.finishedB.length > 0, 20_000, 'receiver settles');
+  await waitFor(() => task.state === 'failed', 20_000, 'sender settles');
 
   const receiver = h.finishedB.at(-1)!;
   assert.equal(receiver.task.state, 'failed');
