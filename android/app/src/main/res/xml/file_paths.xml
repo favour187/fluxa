@@ -1,5 +1,12 @@
 <?xml version="1.0" encoding="utf-8"?>
+<!--
+  Paths the app may hand to another app through its FileProvider. Received files
+  are written into the app's Documents directory (getExternalFilesDir), which is
+  the only location that needs no runtime storage permission on Android 4.4+.
+-->
 <paths xmlns:android="http://schemas.android.com/apk/res/android">
-    <external-path name="my_images" path="." />
-    <cache-path name="my_cache_images" path="." />
+    <external-files-path name="documents" path="." />
+    <external-files-path name="downloads" path="Download/" />
+    <files-path name="internal" path="." />
+    <cache-path name="cache" path="." />
 </paths>

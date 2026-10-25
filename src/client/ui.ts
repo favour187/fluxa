@@ -245,6 +245,7 @@ export class FluxaUI {
     this.renderStage(snapshot);
     this.renderTransfers(snapshot);
     this.syncPairingModal(snapshot);
+    this.renderDirectPanel(snapshot);
     this.renderIncoming(snapshot);
     this.renderVerification(snapshot);
     this.renderToasts(snapshot);
@@ -734,7 +735,7 @@ export class FluxaUI {
 
   private openPairing(): void {
     const overlay = this.openOverlay();
-    const modal = el('div', 'modal');
+    const modal = el('div', 'modal modal-pair');
     modal.setAttribute('role', 'dialog');
     modal.setAttribute('aria-modal', 'true');
     modal.setAttribute('aria-label', 'Pair a device');
@@ -742,17 +743,55 @@ export class FluxaUI {
     modal.innerHTML = `
       <button class="modal-close" aria-label="Close" type="button">×</button>
       <h2>Pair a device</h2>
-      <p class="muted small">Open Fluxa on the other device, choose <em>Pair device</em> and enter this code. It expires in two minutes.</p>
-      <div class="pair-code" data-testid="pair-code">······</div>
-      <div class="qr-wrap"><div class="qr" data-testid="pair-qr"></div><p class="muted tiny">Scan to open a pairing link</p></div>
-      <div class="divider"><span>or join with a code</span></div>
-      <form class="join-form" id="join-form">
-        <input id="join-code" class="code-input" inputmode="latin" autocomplete="off" spellcheck="false" maxlength="6" placeholder="ABC123" aria-label="Pairing code" data-testid="join-code"/>
-        <button class="btn btn-primary" type="submit" data-testid="join-submit">Join</button>
-      </form>
-      <p class="error-text small" id="pair-error" hidden></p>`;
+      <div class="tabs" role="tablist">
+        <button class="tab is-active" role="tab" type="button" data-pair-tab="code" data-testid="pair-tab-code">Same network</button>
+        <button class="tab" role="tab" type="button" data-pair-tab="direct" data-testid="pair-tab-direct">Direct code</button>
+      </div>
+      <div class="pair-panel" data-panel="code">
+        <p class="muted small">Get a code here, then enter it on the other device. It expires in two minutes.</p>
+        <div class="pair-code" data-testid="pair-code">······</div>
+        <div class="qr-wrap"><div class="qr" data-testid="pair-qr"></div><p class="muted tiny">Scan to open a pairing link</p></div>
+        <div class="divider"><span>or join with a code</span></div>
+        <form class="join-form" id="join-form">
+          <input id="join-code" class="code-input" inputmode="latin" autocomplete="off" spellcheck="false" maxlength="6" placeholder="ABC123" aria-label="Pairing code" data-testid="join-code"/>
+          <button class="btn btn-primary" type="submit" data-testid="join-submit">Join</button>
+        </form>
+        <p class="notice small" id="offline-notice" hidden data-testid="offline-notice">
+          No signalling server is reachable from this device. Use <strong>Direct code</strong> instead — it needs no server at all.
+        </p>
+        <p class="error-text small" id="pair-error" hidden></p>
+      </div>
+      <div class="pair-panel" data-panel="direct" hidden>
+        <p class="muted small">
+          Works with no server: this device shows a code, the other device reads it and shows a reply,
+          and you paste the reply back. Everything then runs device-to-device.
+        </p>
+        <div class="direct-idle" data-testid="direct-idle">
+          <button class="btn btn-primary" type="button" data-testid="direct-start">Create a code on this device</button>
+          <div class="divider"><span>or read the other device's code</span></div>
+          <textarea class="ticket-input" rows="3" placeholder="FLX1z…" aria-label="Pairing code from the other device" data-testid="direct-join-input"></textarea>
+          <button class="btn btn-ghost" type="button" data-testid="direct-join-submit">Use this code</button>
+        </div>
+        <div class="direct-ticket" data-testid="direct-ticket-view" hidden>
+          <label class="muted tiny" data-testid="direct-ticket-label">Give this code to the other device</label>
+          <textarea class="ticket-input" rows="3" readonly data-testid="direct-ticket"></textarea>
+          <div class="direct-actions">
+            <button class="btn btn-ghost btn-sm" type="button" data-testid="direct-copy">Copy code</button>
+            <button class="btn btn-ghost btn-sm" type="button" data-testid="direct-share">Share…</button>
+            <button class="btn btn-ghost btn-sm" type="button" data-testid="direct-cancel">Cancel</button>
+          </div>
+          <div class="qr-wrap" data-testid="direct-qr-wrap"><div class="qr" data-testid="direct-qr"></div><p class="muted tiny">Scan with the other device</p></div>
+        </div>
+        <div class="direct-reply" data-testid="direct-reply-view" hidden>
+          <div class="divider"><span>paste the reply from the other device</span></div>
+          <textarea class="ticket-input" rows="3" placeholder="FLX1z…" aria-label="Reply code from the other device" data-testid="direct-reply-input"></textarea>
+          <button class="btn btn-primary" type="button" data-testid="direct-complete">Connect</button>
+        </div>
+        <p class="error-text small" data-testid="direct-error" hidden></p>
+      </div>`;
     modal.querySelector('.modal-close')!.addEventListener('click', () => {
       this.app.cancelPairing();
+      this.app.cancelDirect();
       this.closeOverlay();
     });
     const form = modal.querySelector<HTMLFormElement>('#join-form')!;
@@ -766,14 +805,158 @@ export class FluxaUI {
         err.hidden = false;
         return;
       }
-      // The claim is in flight; failures surface as a toast so the next dialog
-      // (verification) is never blocked by a stale overlay.
       this.closeModal(modal);
     });
+
+    // Tabs
+    const selectTab = (name: string) => {
+      for (const tab of modal.querySelectorAll<HTMLElement>('[data-pair-tab]')) {
+        tab.classList.toggle('is-active', tab.dataset.pairTab === name);
+      }
+      for (const panel of modal.querySelectorAll<HTMLElement>('[data-panel]')) {
+        panel.hidden = panel.dataset.panel !== name;
+      }
+      if (name === 'code') this.app.requestPairingCode();
+      this.renderDirectPanel(this.snapshot!);
+    };
+    for (const tab of modal.querySelectorAll<HTMLElement>('[data-pair-tab]')) {
+      tab.addEventListener('click', () => selectTab(tab.dataset.pairTab!));
+    }
+
+    modal.querySelector('[data-testid="direct-start"]')!.addEventListener('click', () => {
+      void this.app.startDirectPairing();
+    });
+    modal.querySelector('[data-testid="direct-join-submit"]')!.addEventListener('click', () => {
+      const input = modal.querySelector<HTMLTextAreaElement>('[data-testid="direct-join-input"]')!;
+      void this.app.joinDirectPairing(input.value);
+    });
+    modal.querySelector('[data-testid="direct-complete"]')!.addEventListener('click', () => {
+      const input = modal.querySelector<HTMLTextAreaElement>('[data-testid="direct-reply-input"]')!;
+      void this.app.completeDirectPairing(input.value);
+    });
+    modal.querySelector('[data-testid="direct-copy"]')!.addEventListener('click', () => {
+      const value = modal.querySelector<HTMLTextAreaElement>('[data-testid="direct-ticket"]')?.value ?? '';
+      void this.copyText(value);
+    });
+    modal.querySelector('[data-testid="direct-share"]')!.addEventListener('click', () => {
+      const value = modal.querySelector<HTMLTextAreaElement>('[data-testid="direct-ticket"]')?.value ?? '';
+      void this.shareText(value);
+    });
+    modal.querySelector('[data-testid="direct-cancel"]')!.addEventListener('click', () => this.app.cancelDirect());
+
     overlay.append(modal);
     this.pairingModal = modal;
-    this.app.requestPairingCode();
+    // If there is no signalling server, open straight into the mode that works.
+    if (this.snapshot?.status === 'offline') selectTab('direct');
+    else this.app.requestPairingCode();
     this.syncPairingModal(this.snapshot!);
+  }
+
+  /** Copies text, falling back to the old execCommand path inside sandboxed WebViews. */
+  private async copyText(value: string): Promise<void> {
+    if (!value) return;
+    try {
+      await navigator.clipboard.writeText(value);
+      this.app.toast('success', 'Code copied');
+      return;
+    } catch {
+      /* clipboard permission denied — fall through to selection */
+    }
+    const area = el('textarea');
+    area.value = value;
+    area.style.position = 'fixed';
+    area.style.opacity = '0';
+    document.body.append(area);
+    area.select();
+    try {
+      document.execCommand('copy');
+      this.app.toast('success', 'Code copied');
+    } catch {
+      this.app.toast('info', 'Select the code and copy it manually');
+    }
+    area.remove();
+  }
+
+  /** Hands the ticket to the OS share sheet when the platform provides one. */
+  private async shareText(value: string): Promise<void> {
+    if (!value) return;
+    const nav = navigator as Navigator & { share?: (data: { text: string; title?: string }) => Promise<void> };
+    if (typeof nav.share === 'function') {
+      try {
+        await nav.share({ title: 'Fluxa pairing code', text: value });
+        return;
+      } catch {
+        /* user dismissed the sheet */
+        return;
+      }
+    }
+    await this.copyText(value);
+  }
+
+  /** Renders the direct-pairing panel from app state. Called on every snapshot. */
+  private renderDirectPanel(snapshot: AppSnapshot): void {
+    const modal = this.pairingModal;
+    if (!modal) return;
+    const idle = modal.querySelector<HTMLElement>('[data-testid="direct-idle"]')!;
+    const ticketView = modal.querySelector<HTMLElement>('[data-testid="direct-ticket-view"]')!;
+    const replyView = modal.querySelector<HTMLElement>('[data-testid="direct-reply-view"]')!;
+    const errorNode = modal.querySelector<HTMLElement>('[data-testid="direct-error"]')!;
+    const ticketArea = modal.querySelector<HTMLTextAreaElement>('[data-testid="direct-ticket"]')!;
+    const label = modal.querySelector<HTMLElement>('[data-testid="direct-ticket-label"]')!;
+    const qrWrap = modal.querySelector<HTMLElement>('[data-testid="direct-qr-wrap"]')!;
+    const qrNode = modal.querySelector<HTMLElement>('[data-testid="direct-qr"]')!;
+    const direct = snapshot.direct;
+
+    const offline = snapshot.status === 'offline';
+    const offlineNotice = modal.querySelector<HTMLElement>('#offline-notice')!;
+    offlineNotice.hidden = !offline;
+
+    if (direct && (direct.step === 'connecting' || snapshot.sessions.some((s) => s.state === 'awaiting-verification' || s.state === 'connected'))) {
+      // The handshake (or a live session) is up: hand over to the normal
+      // verification / device UI instead of leaving this dialog in the way.
+      this.closeModal(modal);
+      this.app.finishDirectPairing();
+      return;
+    }
+
+    if (!direct) {
+      idle.hidden = false;
+      ticketView.hidden = true;
+      replyView.hidden = true;
+      errorNode.hidden = true;
+      qrWrap.hidden = true;
+      return;
+    }
+    idle.hidden = true;
+    errorNode.hidden = !direct.error;
+    if (direct.error) errorNode.textContent = direct.error;
+
+    if (direct.ticket) {
+      ticketView.hidden = false;
+      ticketArea.value = direct.ticket;
+      label.textContent =
+        direct.role === 'host'
+          ? 'Step 1 — read this code on the other device'
+          : 'Step 2 — the other device reads this reply code';
+      // A pairing ticket carries a full SDP and is far beyond what a QR code can
+      // hold; only draw one when it genuinely fits, otherwise offer copy/share.
+      const qrFits = direct.ticket.length <= 300;
+      qrWrap.hidden = !qrFits;
+      if (qrFits && qrNode.dataset.code !== direct.ticket) {
+        qrNode.dataset.code = direct.ticket;
+        try {
+          qrNode.replaceChildren(this.renderQr(direct.ticket));
+        } catch {
+          qrWrap.hidden = true;
+        }
+      }
+    } else {
+      ticketView.hidden = true;
+      qrWrap.hidden = true;
+    }
+
+    const hostWaiting = direct.role === 'host' && direct.step === 'offer' && Boolean(direct.ticket);
+    replyView.hidden = !hostWaiting;
   }
 
   private syncPairingModal(snapshot: AppSnapshot): void {
@@ -802,14 +985,22 @@ export class FluxaUI {
     }
   }
 
+  /**
+   * Renders a QR code. Only short payloads are attempted: a long one forces the
+   * generator into a huge version, and a canvas of that size exhausts the
+   * renderer's memory (a real crash, not a slow path). Callers must offer
+   * copy/share instead for anything longer.
+   */
   private renderQr(text: string): HTMLElement {
     const size = 29;
     try {
+      if (text.length > 300) return el('div', 'qr-fallback', 'Too long for a QR code');
       const qr = qrcode(0, 'M');
       qr.addData(text);
       qr.make();
       const count = qr.getModuleCount();
       const cell = Math.floor(size * 3);
+      if (count * cell > 1200) return el('div', 'qr-fallback', 'Too long for a QR code');
       const canvas = document.createElement('canvas');
       canvas.width = count * cell;
       canvas.height = count * cell;

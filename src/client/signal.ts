@@ -50,6 +50,8 @@ export class SignalClient {
   private socket: WebSocket | null = null;
   private listeners = new Set<Listener>();
   private reconnectAttempts = 0;
+  /** True once this client has completed a handshake with a server at least once. */
+  private wasReady = false;
   private reconnectTimer: number | null = null;
   private closedByUser = false;
   private url: string;
@@ -82,7 +84,7 @@ export class SignalClient {
       return;
     }
     this.url = url;
-    this.reconnectAttempts = 0;
+    this.resetConnectionState();
     if (this.socket) {
       try {
         this.socket.close();
@@ -136,6 +138,7 @@ export class SignalClient {
         this.iceServers = msg.iceServers ?? [];
         if (typeof msg.chunkSize === 'number') this.chunkSize = msg.chunkSize;
         this.publicUrl = msg.publicUrl ?? null;
+        this.wasReady = true;
         this.setStatus('online');
       }
       this.emit(msg);
@@ -148,13 +151,24 @@ export class SignalClient {
         this.setStatus('offline');
         return;
       }
-      this.setStatus('connecting', 'connection lost, reconnecting');
+      // Never reached the server at all (no server on this device/network):
+      // report that plainly instead of spinning on "connecting" forever, and
+      // keep retrying in the background so a server that appears later is
+      // picked up on its own.
+      if (!this.wasReady) this.setStatus('offline', 'no signalling server reachable');
+      else this.setStatus('connecting', 'connection lost, reconnecting');
       this.scheduleReconnect();
     });
 
     socket.addEventListener('error', () => {
       /* close handler drives reconnection */
     });
+  }
+
+  /** Forget a previous server so status reflects the new one honestly. */
+  resetConnectionState(): void {
+    this.wasReady = false;
+    this.reconnectAttempts = 0;
   }
 
   private scheduleReconnect(): void {

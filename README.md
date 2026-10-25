@@ -49,8 +49,9 @@ same profile are the *same* device and cannot pair with themselves).
 
 ```bash
 npm run check        # TypeScript, strict, no emit
-npm test             # build + 60 unit/integration tests (node:test)
-npm run test:e2e     # 12 Playwright tests, two independent browser contexts
+npm test             # build + 68 unit/integration tests (node:test)
+npm run test:e2e     # 14 Playwright tests: two real browsers, plus a no-server
+                     # direct-pairing run and a 360×640 layout check
 npm run test:desktop # 4 Electron tests under Xvfb (bridge, mDNS, 1 MB transfer)
 npm audit --omit=dev # production dependency audit
 ```
@@ -73,6 +74,7 @@ Legend: ✅ implemented and verified · ⚠️ implemented with documented limit
 | Android app | ⚠️ | Capacitor WebView build; signed release APK + AAB are produced and their contents/signature verified. **Not yet exercised on physical hardware** |
 | iOS app | ❌ | Requires a macOS runner plus an Apple Developer account and provisioning profiles. Nothing is claimed here |
 | Single / multiple file transfer | ✅ | Verified with 0 B, 41 B, 512 KB, 8 MB, 32 MB and mixed batches |
+| **Pairing with no server at all** | ✅ | *Direct code*: the two devices exchange an offer/reply ticket (SDP + identities, deflated base64) with no signalling server and no network service. Verified end to end in `e2e/direct.spec.ts` (pair → verify → 3 MB transfer with matching SHA-256, both devices `offline` throughout) |
 | Folder transfer (structure preserved) | ⚠️ | Directory picker uploads nested paths; the manifest and OPFS layout keep the structure, but "Save" downloads files individually (browser restriction) |
 | Chunked transfer, bounded memory | ✅ | 64 KiB chunks + ack window; measured **3.3 MB** JS-heap growth for a 32 MB transfer |
 | SHA-256 integrity verification | ✅ | Incremental hashing; completion requires a verified digest on both sides |
@@ -125,6 +127,17 @@ server*). It is **not** a renamed web page: the renderer is served from
 `app.asar` through a privileged protocol handler with a strict CSP, file writes go
 through a context-isolated preload bridge (`window.fluxaDesktop`), and remote
 content cannot load.
+
+### Pairing modes
+
+| Mode | Needs | How it works |
+| --- | --- | --- |
+| **Same network** (default) | any Fluxa signalling server — the desktop app's embedded one, or `npm start` | 6-character code + QR, 2-minute TTL, single use |
+| **Direct code** | nothing | one device shows `FLX1…` (offer), the other reads it and shows `FLX1…` (reply), the first pastes the reply back. No server, no account, no network service. Tickets can be copied or sent with the system share sheet |
+
+The direct flow pins each device's identity key from the ticket *before* the
+WebRTC channel opens, so the same signature + DTLS-binding + 6-digit
+verification checks apply — the server was never what made the session secure.
 
 ### Android application
 

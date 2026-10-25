@@ -25,7 +25,7 @@ means per platform, and what a native client would and would not be allowed to d
 
 | Feature | Why not |
 |---|---|
-| Local-network discovery | No browser API exposes LAN peers; discovery needs a native client or explicit pairing |
+| Local-network discovery | No browser API exposes LAN peers; the desktop shell adds mDNS, browsers use a pairing code or a *Direct code* (which needs no server either) |
 | Clipboard monitoring | There is no permission model for "silently watch the clipboard", and the brief forbids it. Clipboard sharing is not implemented at all in this build |
 | Browser tab handoff | Requires a browser extension with `tabs` permission; not built |
 | Installing transferred packages | Fluxa transfers *files*. Installing an APK/MSI/DMG/DEB is the OS's decision, with its own signing and permission rules |

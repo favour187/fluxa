@@ -24,6 +24,17 @@ import type { ReceivedFile } from './transfer/sink.js';
 import { clearReceivedFiles } from './transfer/sink.js';
 import { formatBytes } from '../shared/protocol.js';
 import { desktopBridge, hasFilePicker, type DesktopBridge, type DesktopInfo, type NearbyPeer } from './desktop.js';
+import {
+  ManualRelay,
+  decodeTicket,
+  encodeTicket,
+  ticketCandidates,
+  waitForIceGathering,
+  type DirectTicket,
+  type Relay,
+} from './direct.js';
+import { randomToken } from '../shared/crypto.js';
+import { nativeAvailability, saveFileNative } from './native.js';
 
 export interface SessionView {
   deviceId: string;
@@ -81,6 +92,16 @@ export interface AppSnapshot {
   desktop: DesktopInfo | null;
   nearby: NearbyPeer[];
   signalUrl: string | null;
+  /** Direct (server-less) pairing state, when the user is in that flow. */
+  direct: DirectView | null;
+}
+
+export interface DirectView {
+  role: 'host' | 'guest';
+  step: 'offer' | 'reply' | 'connecting';
+  /** The ticket this device wants the other device to read (null while working). */
+  ticket: string | null;
+  error: string | null;
 }
 
 interface SessionEntry {
@@ -147,6 +168,14 @@ export class FluxaApp {
   private desktopInfo: DesktopInfo | null = null;
   private nearby: NearbyPeer[] = [];
   private nearbyInbound: NearbyPeer[] = [];
+  private direct: DirectView | null = null;
+  private directSession: PeerSession | null = null;
+  private directRelay: ManualRelay | null = null;
+  private directKey: string | null = null;
+  private directNonce: string | null = null;
+  private native = false;
+  /** Where received files were written on this device, by transfer id. */
+  private savedLocations = new Map<string, string>();
 
   async init(): Promise<void> {
     this.identity = await loadIdentity();
@@ -160,6 +189,7 @@ export class FluxaApp {
     this.signal = new SignalClient(this.identity, saved ?? external ?? undefined);
     this.signal.on((event) => void this.onSignalEvent(event));
     this.signal.connect();
+    this.native = (await nativeAvailability()).available;
     await this.initDesktop();
     this.ready = true;
     this.emit();
@@ -281,6 +311,7 @@ export class FluxaApp {
       desktop: this.desktopInfo,
       nearby: this.nearby,
       signalUrl: this.signal?.currentUrl ?? null,
+      direct: this.direct,
     };
   }
 
@@ -408,16 +439,33 @@ export class FluxaApp {
     if (!this.identity || !this.signal) return;
     const existing = this.sessions.get(peer.deviceId);
     if (existing) existing.session.close('replaced by a new pairing');
+    const entry = this.createSession(peer, role, this.signal, this.signal.iceServers);
+    this.sessions.set(peer.deviceId, entry);
+    this.emit();
+    await entry.session.start();
+  }
 
+  /**
+   * Builds a session and its transfer manager. Event handlers resolve the entry
+   * through a box rather than through the map key, because a direct session is
+   * registered under a provisional key until the peer's identity is known.
+   */
+  private createSession(
+    peer: PeerLink,
+    role: 'initiator' | 'responder',
+    relay: Relay & { verify?: (connId: string, ok: boolean) => void },
+    iceServers: RTCIceServer[],
+  ): SessionEntry {
+    const box: { entry: SessionEntry | null } = { entry: null };
     const session = new PeerSession({
-      identity: this.identity,
+      identity: this.identity!,
       peer,
       role,
-      signal: this.signal,
-      iceServers: this.signal.iceServers,
+      signal: relay,
+      iceServers,
       events: {
         onState: (state, detail) => {
-          const entry = this.sessions.get(peer.deviceId);
+          const entry = box.entry;
           if (entry?.error && state !== 'failed') entry.error = null;
           if (state === 'failed' && detail) {
             if (entry) entry.error = detail;
@@ -428,11 +476,10 @@ export class FluxaApp {
           }
           this.emit();
         },
-        onControl: (msg) => this.sessions.get(peer.deviceId)?.manager?.handleControl(msg),
-        onChunk: (streamId, offset, data) =>
-          this.sessions.get(peer.deviceId)?.manager?.handleChunk(streamId, offset, data),
+        onControl: (msg) => box.entry?.manager?.handleControl(msg),
+        onChunk: (streamId, offset, data) => box.entry?.manager?.handleChunk(streamId, offset, data),
         onVerified: () => {
-          const entry = this.sessions.get(peer.deviceId);
+          const entry = box.entry;
           if (entry) void this.refreshConnectionPath(entry);
           void this.rememberPeer(peer);
           this.toast('success', `Verified connection with ${peer.name}`);
@@ -442,7 +489,7 @@ export class FluxaApp {
       },
     });
 
-    const manager = new TransferManager(session, this.identity.name, this.signal.chunkSize, false, {
+    const manager = new TransferManager(session, this.identity!.name, 64 * 1024, false, {
       onUpdate: (task) => this.onTransferUpdate(task),
       onIncoming: (task) => {
         this.incoming = { task };
@@ -457,9 +504,8 @@ export class FluxaApp {
     });
 
     const entry: SessionEntry = { link: peer, session, manager, connection: null, error: null };
-    this.sessions.set(peer.deviceId, entry);
-    this.emit();
-    await session.start();
+    box.entry = entry;
+    return entry;
   }
 
   /** TransferManager signature is (name, session, chunkSize, preferMemory, events). */
@@ -575,8 +621,228 @@ export class FluxaApp {
     return true;
   }
 
+  /* ---------------------------------------------------------------- */
+  /* Direct pairing (no signalling server at all)                      */
+  /* ---------------------------------------------------------------- */
+
+  /**
+   * Creates an offer ticket. Works with no server, no network name resolution
+   * and no permission beyond the browser's own — this is what makes Fluxa
+   * usable on a phone that has nothing else running.
+   */
+  async startDirectPairing(): Promise<void> {
+    if (!this.identity) return;
+    this.cancelDirect(false);
+    const nonce = randomToken(16);
+    const key = `direct:${nonce}`;
+    const peer: PeerLink = {
+      connId: key,
+      deviceId: '',
+      publicKey: '',
+      fingerprint: '',
+      name: 'the other device',
+      platform: 'unknown',
+      sessionNonce: nonce,
+      confirmed: false,
+    };
+    const relay = new ManualRelay();
+    const entry = this.createSession(peer, 'initiator', relay, []);
+    this.direct = { role: 'host', step: 'offer', ticket: null, error: null };
+    this.directSession = entry.session;
+    this.directRelay = relay;
+    this.directKey = key;
+    this.directNonce = nonce;
+    this.sessions.set(key, entry);
+    this.emit();
+
+    try {
+      await entry.session.start();
+      await waitForIceGathering(entry.session.pc);
+      const ticket = await encodeTicket({
+        v: 1,
+        kind: 'offer',
+        nonce,
+        sdp: entry.session.pc.localDescription as { type: 'offer'; sdp: string },
+        identity: this.selfTicketIdentity(),
+        candidates: ticketCandidates(relay),
+      });
+      this.direct = { role: 'host', step: 'offer', ticket, error: null };
+    } catch (err) {
+      this.direct = { role: 'host', step: 'offer', ticket: null, error: (err as Error).message };
+      this.toast('error', `Could not create a pairing code: ${(err as Error).message}`);
+    }
+    this.emit();
+  }
+
+  /** Guest side: reads the host's ticket and produces the reply ticket. */
+  async joinDirectPairing(text: string): Promise<boolean> {
+    if (!this.identity) return false;
+    let ticket: DirectTicket;
+    try {
+      ticket = await decodeTicket(text);
+    } catch (err) {
+      this.toast('error', (err as Error).message);
+      return false;
+    }
+    if (ticket.kind !== 'offer') {
+      this.toast('error', 'That code is a reply, not an invitation — the other device needs to start the pairing');
+      return false;
+    }
+    this.cancelDirect(false);
+    const key = `direct:${ticket.nonce}`;
+    const peer: PeerLink = {
+      connId: key,
+      deviceId: ticket.identity.deviceId,
+      publicKey: ticket.identity.publicKey,
+      fingerprint: ticket.identity.fingerprint,
+      name: ticket.identity.name,
+      platform: ticket.identity.platform,
+      sessionNonce: ticket.nonce,
+      confirmed: false,
+    };
+    const relay = new ManualRelay();
+    const entry = this.createSession(peer, 'responder', relay, []);
+    this.direct = { role: 'guest', step: 'reply', ticket: null, error: null };
+    this.directSession = entry.session;
+    this.directRelay = relay;
+    // The guest already knows the host's identity from the ticket, so the session
+    // is registered under the real device id: verification, device selection and
+    // transfers all look sessions up by device id.
+    this.directKey = ticket.identity.deviceId;
+    this.directNonce = ticket.nonce;
+    this.sessions.set(ticket.identity.deviceId, entry);
+    this.emit();
+
+    try {
+      await entry.session.handleRelay('offer', { sdp: ticket.sdp });
+      for (const candidate of ticket.candidates) {
+        await entry.session.handleRelay('ice', { candidate });
+      }
+      await waitForIceGathering(entry.session.pc);
+      const reply = await encodeTicket({
+        v: 1,
+        kind: 'answer',
+        nonce: ticket.nonce,
+        sdp: entry.session.pc.localDescription as { type: 'answer'; sdp: string },
+        identity: this.selfTicketIdentity(),
+        candidates: ticketCandidates(relay),
+      });
+      this.direct = { role: 'guest', step: 'reply', ticket: reply, error: null };
+      this.emit();
+      return true;
+    } catch (err) {
+      this.direct = { role: 'guest', step: 'reply', ticket: null, error: (err as Error).message };
+      this.toast('error', `Could not answer that pairing code: ${(err as Error).message}`);
+      this.emit();
+      return false;
+    }
+  }
+
+  /** Host side: reads the guest's reply ticket and finishes the negotiation. */
+  async completeDirectPairing(text: string): Promise<boolean> {
+    const session = this.directSession;
+    if (!session || this.direct?.role !== 'host') return false;
+    let ticket: DirectTicket;
+    try {
+      ticket = await decodeTicket(text);
+    } catch (err) {
+      this.toast('error', (err as Error).message);
+      return false;
+    }
+    if (ticket.kind !== 'answer') {
+      this.toast('error', 'That is an invitation code; paste the reply code from the other device');
+      return false;
+    }
+    if (this.directNonce && ticket.nonce !== this.directNonce) {
+      this.toast('error', 'That reply belongs to a different pairing — start again');
+      return false;
+    }
+    try {
+      // Pin the guest's identity before any hello can arrive, then negotiate.
+      session.setPeerIdentity({
+        deviceId: ticket.identity.deviceId,
+        publicKey: ticket.identity.publicKey,
+        fingerprint: ticket.identity.fingerprint,
+        name: ticket.identity.name,
+        platform: ticket.identity.platform,
+      });
+      this.rekeyDirectSession(ticket.identity.deviceId);
+      await session.handleRelay('answer', { sdp: ticket.sdp });
+      for (const candidate of ticket.candidates) {
+        await session.handleRelay('ice', { candidate });
+      }
+      this.direct = { role: 'host', step: 'connecting', ticket: null, error: null };
+      this.emit();
+      void this.rememberPeer({
+        connId: this.directKey ?? '',
+        deviceId: ticket.identity.deviceId,
+        publicKey: ticket.identity.publicKey,
+        fingerprint: ticket.identity.fingerprint,
+        name: ticket.identity.name,
+        platform: ticket.identity.platform,
+        sessionNonce: this.directNonce ?? '',
+        confirmed: true,
+      });
+      return true;
+    } catch (err) {
+      this.direct = { role: 'host', step: 'offer', ticket: this.direct.ticket, error: (err as Error).message };
+      this.toast('error', `Could not connect: ${(err as Error).message}`);
+      this.emit();
+      return false;
+    }
+  }
+
+  /**
+   * Ends the direct-pairing UI once the connection is up, without touching the
+   * session: the dialog has done its job and must get out of the way of the
+   * verification step and the device list.
+   */
+  finishDirectPairing(): void {
+    this.direct = null;
+    this.directSession = null;
+    this.directRelay = null;
+    this.emit();
+  }
+
+  cancelDirect(notify = true): void {
+    if (this.directSession) this.directSession.close('pairing cancelled');
+    if (this.directKey) this.sessions.delete(this.directKey);
+    this.directSession = null;
+    this.directRelay = null;
+    this.directKey = null;
+    this.directNonce = null;
+    const wasActive = this.direct !== null;
+    this.direct = null;
+    if (notify && wasActive) this.emit();
+    else this.emit();
+  }
+
+  /** Moves the provisional `direct:<nonce>` entry under the real device id. */
+  private rekeyDirectSession(deviceId: string): void {
+    const key = this.directKey;
+    if (!key || !this.sessions.has(key) || key === deviceId) return;
+    const entry = this.sessions.get(key)!;
+    this.sessions.delete(key);
+    this.sessions.set(deviceId, entry);
+    this.directKey = deviceId;
+  }
+
+  private selfTicketIdentity(): DirectTicket['identity'] {
+    return {
+      deviceId: this.identity!.deviceId,
+      name: this.identity!.name,
+      platform: this.identity!.platform,
+      publicKey: this.identity!.publicKey,
+      fingerprint: this.identity!.fingerprint,
+    };
+  }
+
   confirmVerification(deviceId: string, matches: boolean): void {
-    const entry = this.sessions.get(deviceId);
+    // Accept a device id or a connection id: a direct pairing knows both, and a
+    // stale view must never silently swallow the user's confirmation.
+    const entry =
+      this.sessions.get(deviceId) ??
+      [...this.sessions.values()].find((e) => e.link.connId === deviceId || e.link.deviceId === deviceId);
     if (!entry) return;
     entry.session.confirmVerification(matches);
     if (!matches) {
@@ -688,7 +954,20 @@ export class FluxaApp {
    * second copy in memory). Fall back to a normal download where it is not
    * available, which is still a genuine save — just to the browser's folder.
    */
-  private async saveBlob(name: string, blob: Blob): Promise<'picker' | 'download' | 'desktop' | 'cancelled'> {
+  private async saveBlob(name: string, blob: Blob): Promise<'picker' | 'download' | 'desktop' | 'native' | 'cancelled'> {
+    // Android: an anchor download is a no-op inside the WebView, so write the
+    // bytes through the native filesystem plugin and offer them to the share
+    // sheet. This is the only path that actually puts the file somewhere.
+    if (this.native) {
+      const result = await saveFileNative(name, blob);
+      if (result.ok) {
+        this.savedLocations.set(name, result.path ?? name);
+        this.toast('success', `Saved ${name} to Documents${result.shared ? ' (shared)' : ''}`);
+        return 'native';
+      }
+      this.toast('error', `Could not save ${name}: ${result.error ?? 'unknown error'}`);
+      return 'cancelled';
+    }
     // Desktop app: the user picks a real destination in a native dialog and the
     // main process writes the bytes (no browser download directory involved).
     const bridge = desktopBridge();

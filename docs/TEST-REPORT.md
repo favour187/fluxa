@@ -308,3 +308,25 @@ artifacts.
   (Windows packages *were* built on Windows in CI; that is a build environment,
   not a run of the app.)
 * macOS `.dmg` was not produced (requires macOS); only the `.zip` was.
+
+## 11. Server-less pairing and small-screen fixes (0.2.x)
+
+Two user-reported defects were fixed and are now covered by tests:
+
+* **No pairing code without a server.** The pairing code came from the signalling
+  server, so an instance with no reachable server showed a spinner and no code —
+  which is every Android install and any desktop instance pointed at nothing.
+  `src/client/direct.ts` adds a ticket exchange (deflated base64 offer/reply
+  carrying SDP + identity + ICE candidates) and `e2e/direct.spec.ts` proves a full
+  pair → verify → 3 MB transfer with **both devices reporting `offline`**.
+  `SignalClient` now also reports `offline` with a reason when it never reached a
+  server, instead of hanging on "connecting".
+* **The app did not fit a small screen.** The fixed three-column board, the
+  non-wrapping header and an unbounded QR canvas overflowed 360×640 (and the QR
+  canvas could crash the renderer outright). The layout is now responsive with a
+  `max-height` breakpoint, the drop zone comes first on phones, the desktop window
+  is clamped to the display and remembers its bounds, and the QR code is only
+  drawn for payloads small enough to be safe. A new test asserts no horizontal
+  overflow and no page overflow at 360×640, and that the pairing dialog fits.
+
+Test counts at this commit: **68 unit**, **14 browser E2E**, **4 desktop E2E**.

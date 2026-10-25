@@ -29,7 +29,8 @@ import {
 } from '../shared/crypto.js';
 import { decodeFrame, encodeChunk, encodeControl, type ControlMessage } from '../shared/protocol.js';
 import type { Identity } from './identity.js';
-import type { PeerLink, SignalClient } from './signal.js';
+import type { PeerLink } from './signal.js';
+import type { Relay } from './direct.js';
 
 export type PeerState =
   | 'idle'
@@ -74,7 +75,12 @@ export class PeerSession {
   channel: RTCDataChannel | null = null;
 
   private readonly identity: Identity;
-  private readonly signal: SignalClient;
+  /**
+   * Where negotiation messages go: the signalling client normally, a
+   * ticket-capturing relay for direct (server-less) pairing. Only `relay` and
+   * `verify` are used, so both satisfy the same shape.
+   */
+  private readonly signal: Relay & { verify?: (connId: string, ok: boolean) => void };
   private readonly events: PeerEvents;
   private pendingCandidates: RTCIceCandidateInit[] = [];
   private remoteDescriptionSet = false;
@@ -92,7 +98,7 @@ export class PeerSession {
     identity: Identity;
     peer: PeerLink;
     role: 'initiator' | 'responder';
-    signal: SignalClient;
+    signal: Relay & { verify?: (connId: string, ok: boolean) => void };
     iceServers: RTCIceServer[];
     events: PeerEvents;
   }) {
@@ -118,6 +124,21 @@ export class PeerSession {
       else if (s === 'connected' && this.state === 'connecting') this.events.onState('handshaking');
     };
     this.pc.ondatachannel = (e) => this.attachChannel(e.channel);
+  }
+
+  /**
+   * Direct pairing learns the peer's identity from the ticket exchange rather
+   * than from a server. It must happen before the remote description is applied
+   * (i.e. before any hello can arrive), which is why it is guarded here: the
+   * identity a session pins can never change after negotiation starts.
+   */
+  setPeerIdentity(info: { deviceId: string; publicKey: string; fingerprint: string; name: string; platform: string }): void {
+    if (this.remoteDescriptionSet) throw new Error('peer identity cannot change after negotiation started');
+    this.peer.deviceId = info.deviceId;
+    this.peer.publicKey = info.publicKey;
+    this.peer.fingerprint = info.fingerprint;
+    this.peer.name = info.name || this.peer.name;
+    this.peer.platform = info.platform || this.peer.platform;
   }
 
   /* ---------------------------------------------------------------- */
@@ -341,11 +362,11 @@ export class PeerSession {
     if (this.verifying) return;
     this.verifying = true;
     if (!matches) {
-      this.signal.verify(this.peer.connId, false);
+      this.signal.verify?.(this.peer.connId, false);
       this.close('verification rejected');
       return;
     }
-    this.signal.verify(this.peer.connId, true);
+    this.signal.verify?.(this.peer.connId, true);
     this.verified = true;
     this.setState('connected');
     this.startPing();

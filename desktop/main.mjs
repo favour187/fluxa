@@ -13,8 +13,9 @@
  * narrow preload bridge, navigation locked to the local origin, and every
  * external link handed to the OS browser.
  */
-import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, shell } from 'electron';
-import { writeFile } from 'node:fs/promises';
+import { app, BrowserWindow, dialog, ipcMain, Menu, Notification, screen, shell } from 'electron';
+import { mkdirSync, readFileSync, writeFileSync } from 'node:fs';
+import { mkdir, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { Bonjour } from 'bonjour-service';
@@ -43,6 +44,33 @@ if (userDataDir) app.setPath('userData', path.resolve(userDataDir));
 const forcedPort = Number(flag('fluxa-port') ?? 0) || 0;
 const externalSignalUrl = flag('fluxa-signal-url') ?? process.env.FLUXA_SIGNAL_URL ?? '';
 const headlessGuard = Boolean(flag('fluxa-test'));
+
+/**
+ * Small persisted UI state (window bounds). Stored next to the app's other data
+ * so a window the user resized to fit their screen stays that way.
+ */
+const preferences = loadPreferences();
+
+function preferencesPath() {
+  return path.join(app.getPath('userData'), 'window-state.json');
+}
+
+function loadPreferences() {
+  try {
+    return JSON.parse(readFileSync(preferencesPath(), 'utf8'));
+  } catch {
+    return {};
+  }
+}
+
+function savePreferences() {
+  try {
+    mkdirSync(path.dirname(preferencesPath()), { recursive: true });
+    writeFileSync(preferencesPath(), JSON.stringify(preferences, null, 2));
+  } catch {
+    /* a read-only profile must not break the app */
+  }
+}
 
 let mainWindow = null;
 let signalling = null;
@@ -167,11 +195,21 @@ function broadcastNearby() {
  * Window
  * ------------------------------------------------------------------ */
 function createWindow() {
+  // Fit the window to the display instead of assuming a large screen: on a small
+  // laptop a 1280×860 window opened taller than the screen, which is why the app
+  // looked oversized. Remember whatever size the user settles on.
+  const work = screen.getPrimaryDisplay().workAreaSize;
+  const saved = preferences.window;
+  const width = Math.min(saved?.width ?? 1280, work.width);
+  const height = Math.min(saved?.height ?? 860, work.height);
   mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 860,
-    minWidth: 940,
-    minHeight: 640,
+    width,
+    height,
+    x: saved?.x,
+    y: saved?.y,
+    minWidth: Math.min(420, work.width),
+    minHeight: Math.min(420, work.height),
+    useContentSize: true,
     backgroundColor: '#06070c',
     show: false,
     title: 'Fluxa',
@@ -186,6 +224,17 @@ function createWindow() {
   });
 
   mainWindow.once('ready-to-show', () => mainWindow.show());
+
+  const rememberBounds = () => {
+    if (!mainWindow || mainWindow.isDestroyed() || mainWindow.isMinimized()) return;
+    preferences.window = { ...mainWindow.getNormalBounds(), maximized: mainWindow.isMaximized() };
+    savePreferences();
+  };
+  mainWindow.on('resized', rememberBounds);
+  mainWindow.on('moved', rememberBounds);
+  mainWindow.on('maximize', rememberBounds);
+  mainWindow.on('unmaximize', rememberBounds);
+  if (saved?.maximized) mainWindow.maximize();
   mainWindow.loadURL(localUrl);
 
   // Keep the renderer on the local origin; anything else goes to the real browser.
